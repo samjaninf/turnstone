@@ -124,6 +124,7 @@ from turnstone.api.openapi import EndpointSpec, QueryParam, build_openapi
 from turnstone.api.schemas import (
     AuthLoginRequest,
     AuthLoginResponse,
+    AuthRefreshResponse,
     AuthSetupRequest,
     AuthSetupResponse,
     AuthStatusResponse,
@@ -152,6 +153,7 @@ from turnstone.api.server_schemas import (
     CommandRequest,
     DequeueRequest,
     ListAttachmentsResponse,
+    ListSavedWorkstreamsResponse,
     ListSkillSummaryResponse,
     ListWorkstreamsResponse,
     RewindRequest,
@@ -245,10 +247,10 @@ CONSOLE_ENDPOINTS: list[EndpointSpec] = [
     EndpointSpec(
         "/v1/api/auth/login",
         "POST",
-        "Authenticate with a token",
+        "Authenticate with a password or raw stored API token",
         request_model=AuthLoginRequest,
         response_model=AuthLoginResponse,
-        error_codes=[401],
+        error_codes=[400, 401, 403, 429, 503],
         tags=["Auth"],
     ),
     EndpointSpec(
@@ -287,6 +289,14 @@ CONSOLE_ENDPOINTS: list[EndpointSpec] = [
         "GET",
         "OIDC callback — validates code, provisions user, sets JWT cookie, redirects to app",
         response_code=302,
+        tags=["Auth"],
+    ),
+    EndpointSpec(
+        "/v1/api/auth/refresh",
+        "POST",
+        "Renew a password/OIDC session from current role permissions",
+        response_model=AuthRefreshResponse,
+        error_codes=[401, 403, 503],
         tags=["Auth"],
     ),
     EndpointSpec(
@@ -1213,16 +1223,20 @@ CONSOLE_ENDPOINTS: list[EndpointSpec] = [
     EndpointSpec(
         "/v1/api/route/workstreams/new",
         "POST",
-        "Create workstream via rendezvous routing proxy",
+        "Create workstream via console routing proxy",
         description=(
             "The documented JSON form accepts RouteCreateRequest. The endpoint also "
             "accepts multipart/form-data with a JSON `meta` field and file parts; "
             "multipart callers must supply `ws_id` as a query parameter; the console "
-            "requires the cached `meta.ws_id` to match before forwarding the original "
-            "body. A JSON body may instead carry "
-            "an explicit `ws_id`; the console preserves it and uses it as the "
-            "rendezvous placement key. `resume_ws` accepts an id or saved alias and "
-            "is resolved to the canonical source id before an atomic fork is routed."
+            "requires `meta.ws_id` to match before forwarding the original upload "
+            "body. A JSON body may instead carry an explicit destination `ws_id`. "
+            "Explicit or inherited node requirements take precedence over rendezvous "
+            "placement while preserving the destination ID. `resume_ws` accepts an "
+            "id or saved alias and is authorized and resolved to its canonical source "
+            "before routing an atomic fork. A fork inherits the source requirement "
+            "unless an explicit destination node is selected for the new ID. "
+            "Metadata-only multipart forks use the same JSON fork path; uploads "
+            "cannot be combined with a fork."
         ),
         request_model=RouteCreateRequest,
         response_model=RouteCreateResponse,
@@ -1231,7 +1245,7 @@ CONSOLE_ENDPOINTS: list[EndpointSpec] = [
             QueryParam(
                 "ws_id",
                 (
-                    "32-hex rendezvous key required for multipart creates. JSON "
+                    "32-hex destination ID required for multipart creates. JSON "
                     "callers put an optional destination ws_id in the request body."
                 ),
             )
@@ -1243,12 +1257,12 @@ CONSOLE_ENDPOINTS: list[EndpointSpec] = [
         "GET",
         "Probe whether a routed workstream is loaded without rehydrating it",
         description=(
-            "Routes to the workstream's rendezvous owner and checks its "
+            "Resolves the workstream's required node or flexible placement and checks its "
             "manager-authoritative active list. The response does not expose "
             "workstream metadata; missing, unloaded, creating, and "
             "caller-invisible rows all report ``live=false``. Routing and "
-            "upstream uncertainty fail with an error rather than reporting a "
-            "false miss."
+            "upstream uncertainty, including an unavailable required node, fail "
+            "with an error rather than reporting a false miss."
         ),
         response_model=RouteLiveResponse,
         error_codes=[400, 502, 503],
@@ -1375,13 +1389,27 @@ CONSOLE_ENDPOINTS: list[EndpointSpec] = [
         "Get coordinator detail (rehydrates lazily on miss)",
         description=(
             "Returns the persisted coordinator's display fields.  If the "
-            "session isn't currently in memory the manager rehydrates it "
+            "session isn't currently in memory, write scope is additionally "
+            "required before the manager rehydrates it "
             "before responding; ``500`` on rehydrate failure carries a "
             "correlation id matching the server log line."
         ),
         response_model=WorkstreamDetailResponse,
         error_codes=[400, 403, 404, 500, 503],
         tags=["Coordinator"],
+    ),
+    EndpointSpec(
+        "/v1/api/workstreams/saved",
+        "GET",
+        "List saved sessions visible to the caller",
+        description=(
+            "Requires read scope. Interactive rows use creator/project visibility; "
+            "coordinator rows additionally require admin.coordinator. A caller without "
+            "that permission receives only interactive rows."
+        ),
+        response_model=ListSavedWorkstreamsResponse,
+        error_codes=[503],
+        tags=["Workstreams"],
     ),
     EndpointSpec(
         "/v1/api/workstreams/{ws_id}/open",
@@ -1780,6 +1808,7 @@ _ALL_MODELS: list[type[BaseModel]] = [
     DeleteSettingResponse,
     AuthLoginRequest,
     AuthLoginResponse,
+    AuthRefreshResponse,
     AuthSetupRequest,
     AuthSetupResponse,
     AuthStatusResponse,

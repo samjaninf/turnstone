@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "turnstone Console API",
-    "version": "1.8.0a7",
+    "version": "1.8.2",
     "description": "Cluster-wide visibility and control across all turnstone nodes."
   },
   "paths": {
@@ -318,7 +318,7 @@
     },
     "/v1/api/auth/login": {
       "post": {
-        "summary": "Authenticate with a token",
+        "summary": "Authenticate with a password or raw stored API token",
         "operationId": "v1_api_auth_login_post",
         "tags": [
           "Auth"
@@ -344,8 +344,48 @@
               }
             }
           },
+          "400": {
+            "description": "Error 400",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Error 401",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error 403",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error 429",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error 503",
             "content": {
               "application/json": {
                 "schema": {
@@ -504,6 +544,57 @@
         "responses": {
           "302": {
             "description": "Success"
+          }
+        }
+      }
+    },
+    "/v1/api/auth/refresh": {
+      "post": {
+        "summary": "Renew a password/OIDC session from current role permissions",
+        "operationId": "v1_api_auth_refresh_post",
+        "tags": [
+          "Auth"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthRefreshResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error 401",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error 403",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error 503",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -4932,12 +5023,12 @@
     },
     "/v1/api/route/workstreams/new": {
       "post": {
-        "summary": "Create workstream via rendezvous routing proxy",
+        "summary": "Create workstream via console routing proxy",
         "operationId": "v1_api_route_workstreams_new_post",
         "tags": [
           "Routing"
         ],
-        "description": "The documented JSON form accepts RouteCreateRequest. The endpoint also accepts multipart/form-data with a JSON `meta` field and file parts; multipart callers must supply `ws_id` as a query parameter; the console requires the cached `meta.ws_id` to match before forwarding the original body. A JSON body may instead carry an explicit `ws_id`; the console preserves it and uses it as the rendezvous placement key. `resume_ws` accepts an id or saved alias and is resolved to the canonical source id before an atomic fork is routed.",
+        "description": "The documented JSON form accepts RouteCreateRequest. The endpoint also accepts multipart/form-data with a JSON `meta` field and file parts; multipart callers must supply `ws_id` as a query parameter; the console requires `meta.ws_id` to match before forwarding the original upload body. A JSON body may instead carry an explicit destination `ws_id`. Explicit or inherited node requirements take precedence over rendezvous placement while preserving the destination ID. `resume_ws` accepts an id or saved alias and is authorized and resolved to its canonical source before routing an atomic fork. A fork inherits the source requirement unless an explicit destination node is selected for the new ID. Metadata-only multipart forks use the same JSON fork path; uploads cannot be combined with a fork.",
         "parameters": [
           {
             "name": "ws_id",
@@ -4946,7 +5037,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "32-hex rendezvous key required for multipart creates. JSON callers put an optional destination ws_id in the request body."
+            "description": "32-hex destination ID required for multipart creates. JSON callers put an optional destination ws_id in the request body."
           }
         ],
         "requestBody": {
@@ -5070,7 +5161,7 @@
         "tags": [
           "Routing"
         ],
-        "description": "Routes to the workstream's rendezvous owner and checks its manager-authoritative active list. The response does not expose workstream metadata; missing, unloaded, creating, and caller-invisible rows all report ``live=false``. Routing and upstream uncertainty fail with an error rather than reporting a false miss.",
+        "description": "Resolves the workstream's required node or flexible placement and checks its manager-authoritative active list. The response does not expose workstream metadata; missing, unloaded, creating, and caller-invisible rows all report ``live=false``. Routing and upstream uncertainty, including an unavailable required node, fail with an error rather than reporting a false miss.",
         "parameters": [
           {
             "name": "ws_id",
@@ -6004,7 +6095,7 @@
         "tags": [
           "Coordinator"
         ],
-        "description": "Returns the persisted coordinator's display fields.  If the session isn't currently in memory the manager rehydrates it before responding; ``500`` on rehydrate failure carries a correlation id matching the server log line.",
+        "description": "Returns the persisted coordinator's display fields.  If the session isn't currently in memory, write scope is additionally required before the manager rehydrates it before responding; ``500`` on rehydrate failure carries a correlation id matching the server log line.",
         "parameters": [
           {
             "name": "ws_id",
@@ -6062,6 +6153,38 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error 503",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/api/workstreams/saved": {
+      "get": {
+        "summary": "List saved sessions visible to the caller",
+        "operationId": "v1_api_workstreams_saved_get",
+        "tags": [
+          "Workstreams"
+        ],
+        "description": "Requires read scope. Interactive rows use creator/project visibility; coordinator rows additionally require admin.coordinator. A caller without that permission receives only interactive rows.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListSavedWorkstreamsResponse"
                 }
               }
             }
@@ -7876,7 +7999,7 @@
           },
           "token": {
             "default": "",
-            "description": "Legacy: bearer token to authenticate",
+            "description": "Raw stored ts_ API token; JWT exchange is refused",
             "title": "Token",
             "type": "string"
           }
@@ -7921,12 +8044,82 @@
             "description": "JWT session token (if JWT auth is configured)",
             "title": "Jwt",
             "type": "string"
+          },
+          "can_refresh": {
+            "default": false,
+            "description": "Eligible for human-session renewal",
+            "title": "Can Refresh",
+            "type": "boolean"
           }
         },
         "required": [
           "role"
         ],
         "title": "AuthLoginResponse",
+        "type": "object"
+      },
+      "AuthRefreshResponse": {
+        "description": "POST /v1/api/auth/refresh success response.",
+        "properties": {
+          "status": {
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "user_id": {
+            "default": "",
+            "description": "Authenticated user ID",
+            "title": "User Id",
+            "type": "string"
+          },
+          "role": {
+            "description": "Legacy role",
+            "examples": [
+              "full",
+              "read"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "scopes": {
+            "default": "",
+            "description": "Comma-separated scopes",
+            "examples": [
+              "read,write,approve"
+            ],
+            "title": "Scopes",
+            "type": "string"
+          },
+          "jwt": {
+            "default": "",
+            "description": "JWT session token (if JWT auth is configured)",
+            "title": "Jwt",
+            "type": "string"
+          },
+          "can_refresh": {
+            "default": false,
+            "description": "Eligible for human-session renewal",
+            "title": "Can Refresh",
+            "type": "boolean"
+          },
+          "exp": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Session expiry in epoch seconds",
+            "title": "Exp"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "title": "AuthRefreshResponse",
         "type": "object"
       },
       "AuthSetupRequest": {
@@ -7987,6 +8180,12 @@
             "description": "JWT session token",
             "title": "Jwt",
             "type": "string"
+          },
+          "can_refresh": {
+            "default": false,
+            "description": "Eligible for human-session renewal",
+            "title": "Can Refresh",
+            "type": "boolean"
           }
         },
         "required": [
@@ -8783,7 +8982,7 @@
         "properties": {
           "node_id": {
             "default": "",
-            "description": "Target node: specific ID, 'auto', 'pool', or empty for auto",
+            "description": "Required node: a specific ID pins execution; 'auto', 'pool', or empty select initial placement only",
             "title": "Node Id",
             "type": "string"
           },
@@ -8828,6 +9027,28 @@
             "description": "Source workstream ID or alias to fork atomically into the new workstream",
             "title": "Resume Ws",
             "type": "string"
+          },
+          "resume_ws_exact": {
+            "default": false,
+            "description": "Require an exact fork source ID",
+            "title": "Resume Ws Exact",
+            "type": "boolean"
+          },
+          "required_node_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9_.-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Durable execution requirement; omission inherits the fork source requirement",
+            "title": "Required Node Id"
           },
           "judge_model": {
             "default": "",
@@ -9795,7 +10016,7 @@
         "type": "object"
       },
       "CreateScheduleRequest": {
-        "description": "POST /v1/api/admin/schedules request body.",
+        "description": "POST /v1/api/admin/schedules request body.\n\nA field sent as null is rejected with a 400 naming the field; omit a\nfield to take its default.",
         "properties": {
           "name": {
             "description": "Human-readable schedule name",
@@ -9823,6 +10044,12 @@
             "default": "",
             "description": "ISO8601 timestamp (when schedule_type='at')",
             "title": "At Time",
+            "type": "string"
+          },
+          "timezone": {
+            "default": "UTC",
+            "description": "IANA zone the cron is evaluated in (e.g. America/New_York); 'at' ignores it",
+            "title": "Timezone",
             "type": "string"
           },
           "target_mode": {
@@ -9898,7 +10125,7 @@
         "type": "object"
       },
       "UpdateScheduleRequest": {
-        "description": "PUT /v1/api/admin/schedules/{task_id} request body (partial update).",
+        "description": "PUT /v1/api/admin/schedules/{task_id} request body (partial update).\n\nOmit a field to leave it unchanged; a field sent as null is rejected with\na 400 naming the field, and a timing field resent with its stored value\nis not a change.",
         "properties": {
           "name": {
             "anyOf": [
@@ -9959,6 +10186,18 @@
             ],
             "default": null,
             "title": "At Time"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Timezone"
           },
           "target_mode": {
             "anyOf": [
@@ -10121,6 +10360,11 @@
           "at_time": {
             "default": "",
             "title": "At Time",
+            "type": "string"
+          },
+          "timezone": {
+            "default": "UTC",
+            "title": "Timezone",
             "type": "string"
           },
           "target_mode": {
@@ -15024,6 +15268,22 @@
       "RouteCreateRequest": {
         "description": "JSON workstream creation through the routing proxy.",
         "properties": {
+          "required_node_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9_.-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Required execution node. Omission permits automatic placement for a fresh workstream and inherits the source requirement for a fork. An explicit destination applies only to the new workstream ID.",
+            "title": "Required Node Id"
+          },
           "name": {
             "default": "",
             "description": "Workstream display name (auto-generated if empty)",
@@ -15075,6 +15335,12 @@
             "description": "Source workstream ID or alias to fork atomically into the new workstream (empty = fresh start)",
             "title": "Resume Ws",
             "type": "string"
+          },
+          "resume_ws_exact": {
+            "default": false,
+            "description": "Require an exact source ID in resume_ws; disable alias and prefix resolution",
+            "title": "Resume Ws Exact",
+            "type": "boolean"
           },
           "skill": {
             "default": "",
@@ -15158,7 +15424,7 @@
           },
           "target_node": {
             "default": "",
-            "description": "Optional node id to pin placement to. The console generates a workstream id whose rendezvous owner is that node.",
+            "description": "Optional required execution node. Applies even with a supplied destination ID or fork source. Must match required_node_id when both are supplied.",
             "title": "Target Node",
             "type": "string"
           }
@@ -15226,7 +15492,7 @@
             "type": "string"
           },
           "routing_strategy": {
-            "description": "Placement reason: rendezvous for a destination id, target_node for a generated pinned id, or resume when an atomic fork is routed by its canonical source id",
+            "description": "Placement reason: rendezvous for a destination id, target_node for an explicit execution requirement, or resume when an atomic fork inherits its source requirement or placement",
             "enum": [
               "rendezvous",
               "target_node",
@@ -15552,6 +15818,18 @@
             "default": "",
             "title": "Permissions",
             "type": "string"
+          },
+          "scopes": {
+            "default": "",
+            "description": "Comma-separated effective transport scopes",
+            "title": "Scopes",
+            "type": "string"
+          },
+          "can_refresh": {
+            "default": false,
+            "description": "Eligible for human-session renewal",
+            "title": "Can Refresh",
+            "type": "boolean"
           }
         },
         "required": [
@@ -15843,6 +16121,151 @@
           "state"
         ],
         "title": "WorkstreamInfo",
+        "type": "object"
+      },
+      "ListSavedWorkstreamsResponse": {
+        "properties": {
+          "workstreams": {
+            "items": {
+              "$ref": "#/components/schemas/SavedWorkstreamInfo"
+            },
+            "title": "Workstreams",
+            "type": "array"
+          }
+        },
+        "required": [
+          "workstreams"
+        ],
+        "title": "ListSavedWorkstreamsResponse",
+        "type": "object"
+      },
+      "SavedWorkstreamInfo": {
+        "properties": {
+          "ws_id": {
+            "title": "Ws Id",
+            "type": "string"
+          },
+          "alias": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Alias"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Title"
+          },
+          "created": {
+            "title": "Created",
+            "type": "string"
+          },
+          "updated": {
+            "title": "Updated",
+            "type": "string"
+          },
+          "message_count": {
+            "title": "Message Count",
+            "type": "integer"
+          },
+          "state": {
+            "default": "idle",
+            "title": "State",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/WorkstreamKind",
+            "default": "interactive"
+          },
+          "node_id": {
+            "default": "",
+            "title": "Node Id",
+            "type": "string"
+          },
+          "model_alias": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Model Alias"
+          },
+          "launch_skill": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Launch Skill"
+          },
+          "child_count": {
+            "default": 0,
+            "title": "Child Count",
+            "type": "integer"
+          },
+          "context_tokens": {
+            "default": 0,
+            "title": "Context Tokens",
+            "type": "integer"
+          },
+          "context_ratio": {
+            "default": 0.0,
+            "title": "Context Ratio",
+            "type": "number"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Project Id"
+          },
+          "persona": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Persona"
+          }
+        },
+        "required": [
+          "ws_id",
+          "created",
+          "updated",
+          "message_count"
+        ],
+        "title": "SavedWorkstreamInfo",
         "type": "object"
       },
       "UploadAttachmentResponse": {

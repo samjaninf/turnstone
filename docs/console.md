@@ -184,7 +184,7 @@ All fields are optional:
 - `node_id` — targeting mode:
   - **omitted or `"auto"`** — console picks the reachable node with the most available capacity (max_ws - ws_total) and proxies the request to it.
   - **`"pool"`** — compatibility alias for automatic placement on the reachable node with the most headroom.
-  - **specific node ID** — proxies the request to that node directly.
+  - **specific node ID** — requires execution on that node, including after restart or close.
 - `name` — workstream display name. Auto-generated if omitted.
 - `model` — model alias from the target node's registry. Uses the node's default model if omitted.
 - `judge_model` — optional judge-model alias for this workstream.
@@ -195,6 +195,11 @@ All fields are optional:
 - `resume_ws` — source ID to **fork** atomically into a new workstream. The
   source remains unchanged; its checkpoint-bounded history, configuration,
   persona, project, and attachment references are copied transactionally.
+  Omission of a destination node inherits the source's execution requirement;
+  an explicit destination pins the new conversation there.
+- `resume_ws_exact` — require the exact source ID without alias resolution.
+- `required_node_id` — optional explicit execution requirement; must agree with
+  a specific `node_id` when both are supplied.
 
 The endpoint also accepts the same multipart create shape as a node: one
 JSON-encoded `meta` field plus up to ten `file` parts. Files require an
@@ -220,9 +225,9 @@ rather than treating them as two creates.
 
 For safety, the console masks most target-node failures as the opaque `502`
 shape `{"error":"Dispatch to node <node_id> failed"}` instead of reflecting
-arbitrary node text or retry-triggering 401/429 responses. The coded
-`server.require_project` refusal is the exception and remains a `400` with
-actionable wording. Consult the target node's logs for the underlying create
+arbitrary node text or retry-triggering 401/429 responses. Coded
+`server.require_project` (`400`) and wrong-execution-node (`409`) refusals retain
+their actionable wording. Consult the target node's logs for the underlying create
 correlation when a reachable node returns a masked 502.
 
 ### `GET /v1/api/cluster/events`
@@ -390,11 +395,20 @@ The rail is fed by the cluster SSE snapshot and shows:
   coordinator parent and grouped by project when project metadata is visible;
 - permission-filtered Manage groups that open the singleton Admin pane.
 
-Coordinator and interactive conversations open as tabs inside the same shell.
-Interactive panes use the owning node's console proxy, so users do not need
-direct network access to compute-node ports. Split-right and split-down actions
-can display several panes at once. Closing a pane removes only that tab; use the
-pane menu's explicit close or delete action to change the workstream lifecycle.
+Coordinator and interactive conversations open as tabs inside the same shell. Interactive panes use
+the owning node's console proxy, so users do not need direct network access to compute-node ports.
+Split-right and split-down actions can display several panes at once. The active tab's accent
+underline matches its pane's solid accent border; other visible tabs have a neutral frame. Each tab
+has a leading dismiss button: `−` hides a regular split pane while keeping its tab open; `×` closes a
+background tab, single pane, or preview. Hiding a pane immediately changes its tab's button to `×`.
+Hovering or focusing the button outlines its visible pane with a dashed line, distinct from the active
+pane's solid accent. The Dashboard can be hidden from a split but cannot be closed. A trailing chevron
+button opens the pane's action menu; Enter, Space, or ArrowDown opens it from the keyboard. The tab
+label also supports right-click and Shift+F10. Closing a pane removes only that tab; use the menu's
+explicit close or delete action to change the workstream lifecycle. When tabs overflow, their strip
+scrolls horizontally; activating a tab or moving keyboard focus to one of its controls reveals the
+complete tab. When the strip or tab widths change, the tab with keyboard focus stays visible;
+otherwise, the active tab stays visible.
 
 ### Dashboard pane
 
@@ -407,8 +421,10 @@ workstream rows, and tab state glyphs synchronized.
 ### Workstream launcher
 
 The landing-page composer starts a workstream with an optional initial task and
-attachments. When the caller can create both kinds, a Coordinator / Interactive
-toggle selects the target kind. Its options include:
+attachments. A Coordinator / Interactive / Scheduled toggle selects the target
+kind; each option appears only when the caller holds its permission
+(`admin.coordinator`, `workstreams.create`, `admin.schedules`), and the toggle
+is hidden when only one kind is available. Its options include:
 
 - **Node placement** — "Least loaded" picks the reachable node with the most
   headroom, or "Specific node" pins the create to a node from the live list.
@@ -424,6 +440,23 @@ Interactive launches additionally expose node strategy / node selection.
 Submitting uses `POST /v1/api/cluster/workstreams/new`; coordinator launches use
 the console's coordinator create surface. A toast confirms the committed
 create, while SSE updates the dashboard and opens the resulting pane.
+
+**Scheduled** launches store a schedule instead of starting anything: the
+scheduler later dispatches the task as an interactive workstream (see
+[Scheduled Tasks](#scheduled-tasks)). The kind carries the interactive field
+set, including node placement, and reveals a **When** builder between the
+kind toggle and the composer with Daily / Weekly / Monthly / Interval / Once /
+Cron modes and a live "next runs" read-out. Recurring times are entered in the
+browser's time zone, which is stored with the schedule and is the zone the
+scheduler evaluates the cron in, so a wall-clock time keeps its meaning across
+daylight-saving changes; the time inputs are labelled with the zone. A one-shot
+takes local time. The read-out and the confirmation show each run in the
+browser's local zone. The task text becomes the schedule's initial message and
+is required; the Name option, when empty, is derived from the task's first
+line. Judge model and attachments do not apply, so the kind hides them.
+Submitting uses `POST /v1/api/admin/schedules`; a confirmation beneath the
+composer names the first run, and the schedule is then managed under Admin ›
+Schedules.
 
 Files require a non-empty initial task so the first turn consumes the staged
 attachments. The console shell does not currently expose a fork action; use the
@@ -515,6 +548,9 @@ live; edits apply without restart.
 
 **MCP Servers tab:**
 
+Choose authentication using the [MCP authentication guide](mcp-oauth.md), which
+covers shared tokens, per-user consent, org sign-in, and remote Docker setup.
+
 The tab has two views toggled via a pill control: **Servers** and
 **Registry**.
 
@@ -548,6 +584,16 @@ to create the initial admin user and receive a JWT in one step. See
 
 The console includes a background **TaskScheduler** daemon that creates workstreams on a timed basis via HTTP proxy to target nodes. It supports cron-based recurring schedules and one-shot `at` schedules.
 
+Schedules are created and managed under Admin › Schedules, and can also be
+created from the dashboard launcher's Scheduled kind (see
+[Workstream launcher](#workstream-launcher)). Both surfaces share one timing
+builder, which labels the recurring-time inputs with the zone they are read in:
+the browser's for a new schedule, the saved zone when editing (an edit never
+re-zones a schedule to the editor's browser). The admin shelf additionally
+offers a description, auto-approve, notification targets and the pool / all
+target modes; its list names a schedule's zone beside the cron when it is not
+UTC.
+
 ### Architecture
 
 The scheduler runs as a daemon thread inside the console process. Every `check_interval` seconds (default 15) it:
@@ -555,7 +601,7 @@ The scheduler runs as a daemon thread inside the console process. Every `check_i
 1. Acquires a distributed lock via the `system_settings` table (prevents duplicate dispatch in multi-console deployments)
 2. Queries the storage backend for tasks whose `next_run <= now` and `enabled = true`
 3. Dispatches each due task as one or more workstream creation requests via HTTP proxy
-4. Updates `last_run` and computes the next `next_run` (or disables one-shot `at` tasks)
+4. Updates `last_run` and computes the next `next_run` (or disables one-shot `at` tasks). A recurring schedule whose zone the host can no longer resolve, or whose expression has no future firing, is disabled with the reason recorded in its run history; re-enabling it re-validates the stored timing. A firing on which no node created the workstream is held when that is certain (no reachable node, a connection that never opened, a node's 4xx answer): its `next_run` stays at the due time and the firing is attempted again about once a minute (`retry_interval`) for five minutes after its first failed attempt (`retry_window`), then given up. When the answer does not say whether the workstream was created (a lost reply, a connection dropped mid-request, a 5xx) the firing is not retried, since another attempt could create a second workstream; its `failed` row says so. A given-up or unretried firing advances the schedule from the clock with `last_run` untouched; a one-shot is disabled with the reason in its run history and needs a new time to run again. Held firings are kept in a `system_settings` row beside the scheduler lock, so every console paces them alike and a restart does not restart the window.
 5. Releases the lock
 
 Run history is automatically pruned (runs older than 90 days) approximately once per hour.
@@ -564,8 +610,21 @@ Run history is automatically pruned (runs older than 90 days) approximately once
 
 | Type | Field | Behavior |
 |------|-------|----------|
-| `cron` | `cron_expr` | Recurring schedule using standard 5-field cron syntax. Requires `croniter`. |
+| `cron` | `cron_expr`, `timezone` | Recurring schedule using standard 5-field cron syntax, evaluated in `timezone` (an IANA name such as `America/New_York`; default `UTC`). Requires `croniter`. |
 | `at` | `at_time` | One-shot: fires once at the given ISO 8601 timestamp (must include timezone), then auto-disables. |
+
+A cron's fields are wall-clock in its `timezone`: `30 2 * * *` in
+`America/New_York` fires at 02:30 local on either side of a daylight-saving
+change, and a weekly day is the local day. A time the spring-forward gap
+removes fires at the first instant after it. On the fall-back day an
+expression that names times of day (literal minute and hour fields or
+ranges without a step, such as `0 1-2 * * *`, or a shorthand such as
+`@daily`) fires each of them once, while a cadence (a step or wildcard in
+either field) keeps firing through the repeated hour, which is real time.
+`next_run` and `last_run` are always stored in UTC, whatever the zone; for a
+one-shot the offset in `at_time` is folded into `next_run` while `at_time`
+itself is kept as submitted. Schedules created before the zone was stored
+carry `UTC`, the zone they were always evaluated in.
 
 ### Target Modes
 
@@ -583,6 +642,8 @@ Run history is automatically pruned (runs older than 90 days) approximately once
 | `check_interval` | `15.0` | Seconds between scheduler ticks |
 | `lock_ttl` | `60` | Distributed lock TTL in seconds |
 | `max_fan_out` | `20` | Maximum nodes for `all` target mode |
+| `retry_window` | `300.0` | Seconds after a firing's first failed attempt during which it is retried |
+| `retry_interval` | `60.0` | Seconds between attempts of a held firing |
 
 Dependency: `croniter` (installed with turnstone).
 
@@ -604,6 +665,7 @@ List all scheduled tasks.
       "schedule_type": "cron",
       "cron_expr": "0 2 * * *",
       "at_time": "",
+      "timezone": "America/New_York",
       "target_mode": "auto",
       "model": "",
       "initial_message": "Run the nightly health check suite.",
@@ -632,6 +694,7 @@ Request:
   "description": "Run nightly health checks",
   "schedule_type": "cron",
   "cron_expr": "0 2 * * *",
+  "timezone": "America/New_York",
   "target_mode": "auto",
   "initial_message": "Run the nightly health check suite.",
   "auto_approve": false,
@@ -639,9 +702,9 @@ Request:
 }
 ```
 
-Required fields: `name`, `schedule_type`, `initial_message`. For `cron` schedules provide `cron_expr`; for `at` schedules provide `at_time` (ISO 8601 with timezone, must be in the future).
+Required fields: `name`, `schedule_type`, `initial_message`. For `cron` schedules provide `cron_expr` and, optionally, `timezone` (an IANA zone name; absent or blank means `UTC`); for `at` schedules provide `at_time` (ISO 8601 with timezone, must be in the future). A field sent as `null` is rejected with `400` naming the field.
 
-Response: `ScheduleInfo` (same shape as list items above). Returns `400` for invalid cron syntax, naive timestamps, or past `at_time`. Returns `409` if the 200-schedule cap is reached.
+Response: `ScheduleInfo` (same shape as list items above). Returns `400` for invalid cron syntax, a cron that never matches a real calendar date, an unknown `timezone`, naive timestamps, or past `at_time`. Returns `409` if the 200-schedule cap is reached.
 
 #### `GET /v1/api/admin/schedules/{task_id}`
 
@@ -649,7 +712,7 @@ Get a single scheduled task. Returns `ScheduleInfo` or `404`.
 
 #### `PUT /v1/api/admin/schedules/{task_id}`
 
-Partial update — only include fields to change. If `schedule_type`, `cron_expr`, or `at_time` change, `next_run` is recomputed automatically.
+Partial update — only include fields to change; a field sent as `null` is rejected with `400` naming the field, as is a blank `timezone` (name a zone to change it). A timing field resent with its stored value is not a change. If `schedule_type`, `cron_expr`, `at_time`, or `timezone` change, `next_run` is recomputed automatically.
 
 ```json
 {
@@ -684,7 +747,7 @@ List execution history for a task (most recent first). `limit` defaults to 50, m
 }
 ```
 
-Status is `dispatched` on success or `failed` with an `error` message (e.g. no reachable nodes). Failed runs do not advance `next_run`.
+Status is `dispatched` on success, `failed` with an `error` message (e.g. no reachable nodes) for each attempt that created no workstream, or `disabled` when the schedule was disabled at dispatch, with the reason in `error`: no next firing could be computed, or a one-shot's firing was given up. When a failed firing is retried, and when it is not, is described under the scheduler's architecture above.
 
 ---
 

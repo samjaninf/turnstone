@@ -171,6 +171,7 @@ from turnstone.core.model_turn import (
     create_provider,
     finalize_provider_blocks,
     folds_trailing_info,
+    is_empty_completion,
     lane_diagnostics,
     lane_error_is_retryable,
     lane_matches_explicit_handles,
@@ -211,6 +212,7 @@ from turnstone.core.preview import (
     build_preview_descriptor,
     inject_base_href,
     page_title,
+    preview_filename,
     resolve_preview_kind,
     transcode_text,
 )
@@ -385,6 +387,17 @@ class ConversationPersistenceError(Exception):
 
 class _MalformedToolBatchError(RuntimeError):
     """Provider tool calls cannot be executed without unambiguous identities."""
+
+
+class _EmptyCompletionError(RuntimeError):
+    """A completed response rejected by the conversation's structural policy."""
+
+    def __init__(self, result: ModelTurnResult) -> None:
+        self.result = result
+        message = "Model returned no answer or tool call. Retry the turn or choose another model."
+        if result.native_tools_enabled is not False:
+            message += " Automatic retry was skipped because the request may run server-side tools."
+        super().__init__(message)
 
 
 _CONVERSATION_PERSISTENCE_RETRY_BASE_SECONDS = 1.0
@@ -823,8 +836,9 @@ class _StreamTurnConsumer:
     def end_attempt(self) -> None:
         """Pronounce the current attempt dead: nothing about it may leak.
 
-        The re-issue ladder calls this once a mid-stream death's partial
-        is captured: from here until the next ``begin_attempt`` there is
+        The re-issue ladder calls this after capturing the partial and
+        emitting stream_end, as its call-site sequencing comment explains.
+        From here until the next ``begin_attempt`` there is
         NO live attempt, so ``attempt_armed`` reads False.  Otherwise a
         Stop or a walk-preamble failure landing in the re-create window
         reads the DEAD attempt's armed ref — re-finalizing discarded
@@ -6799,6 +6813,7 @@ class ChatSession:
         *,
         principal_id: str,
         source_reservation_token: str,
+        source_required_node_id: str | None = None,
         trusted_internal: bool = False,
     ) -> ForkCloneSnapshot:
         """Atomically clone, then adopt, one authorized source snapshot."""
@@ -6816,6 +6831,8 @@ class ChatSession:
             project_writable=project_access.project_writable,
             destination_reservation_token=self._fork_reservation_token,
             source_reservation_token=source_reservation_token,
+            source_required_node_id=source_required_node_id,
+            node_id=self._node_id,
         )
         snapshot = storage.clone_workstream(
             source_ws_id,
@@ -6854,6 +6871,18 @@ class ChatSession:
         """
         if _fork_snapshot is not None and not fork:
             raise ValueError("a fork snapshot requires fork=True")
+        from turnstone.core.node_affinity import require_execution_node
+
+        if _fork_snapshot is not None:
+            require_execution_node(_fork_snapshot.required_node_id, self._node_id)
+        elif fork:
+            source_row = get_storage().get_workstream(ws_id)
+            if source_row and source_row.get("required_node_id"):
+                raise ValueError("Use atomic workstream creation to fork a node-bound session")
+        else:
+            target_row = get_storage().get_workstream(ws_id)
+            if target_row is not None:
+                require_execution_node(target_row.get("required_node_id"), self._node_id)
         turns = (
             list(_fork_snapshot.turns)
             if _fork_snapshot is not None
@@ -6879,8 +6908,12 @@ class ChatSession:
         resumed_attached_project_id = ""
         resumed_incarnation_token = ""
         if not fork:
+            # History loading can overlap a same-ID replacement. Keep this
+            # authoritative check after loading as well as the cheap preflight.
             storage = get_storage()
             target_row = storage.ensure_workstream_incarnation_snapshot(ws_id)
+            if target_row is not None:
+                require_execution_node(target_row.get("required_node_id"), self._node_id)
             raw_project_id = target_row.get("project_id") if target_row is not None else None
             target_project_id = (
                 raw_project_id.strip()
@@ -7118,14 +7151,6 @@ class ChatSession:
                 message_count=len(self.messages),
             )
 
-        if self._nudges_enabled("resume") and should_nudge(
-            "resume",
-            self._metacog_state,
-            message_count=len(self.messages),
-            memory_count=self._visible_memory_count(),
-            cooldown_secs=self._mem_cfg.nudge_cooldown,
-        ):
-            self._queue_user_advisory("resume", format_nudge("resume"))
         if not fork:
             self._follow_watch_registration(old_ws_id)
         self._init_system_messages()
@@ -8786,7 +8811,7 @@ class ChatSession:
         models get each turn wrapped as a nonce-delimited
         ``[start system-reminder]`` block on the preceding turn; native
         mid-conversation-system models (rows with the capability flag)
-        keep them inline for the Anthropic converter to emit as real
+        keep them inline for the provider converter to emit as real
         ``system`` messages.
 
         Messages without a foldable system turn pass through unchanged
@@ -14574,9 +14599,8 @@ class ChatSession:
         # (read off the frame's consumer, never a session slot), so an
         # orphaned generation cannot poison a live one's preservation.
         dead_partial = ""
-        # The armed death whose re-issue is in progress; when the RE-CREATE
-        # phase fails with an unarmed error, the original death is the one
-        # the operator needs to see, not the re-create's.
+        # The armed failure whose re-issue is in progress. A transport death
+        # can explain a later re-create failure; an empty completion cannot.
         last_stream_death: Exception | None = None
         # Provenance of the attempt whose text ``dead_partial`` carries.  A
         # zero-token re-death must not relabel preserved text from the prior
@@ -14606,16 +14630,21 @@ class ChatSession:
             """Hand send()'s cancel handler the retry window's partial.
 
             Runs on a same-generation Stop anywhere in the retry window.
-            Unconditional when no partial was recorded — empty content
-            still takes the cancel handler's marker-as-message branch,
-            preserving the invariant that a cancelled streaming turn
-            always persists the cancellation-marker row.  Backfills a
+            An armed attempt first flushes its display, emits stream_end,
+            records its cancellation partial, and disarms. Keeping it armed
+            until that finalization preserves even a zero-text Stop marker.
+            Once an attempt has streamed, empty content still takes the
+            cancel handler's marker-as-message branch. A Stop before any
+            attempt streams writes no assistant row. Backfills a
             recorded-but-EMPTY partial (a Stop in the re-create/TTFT
             window records the new attempt's empty content) with the
             previous attempt's text: cancel-in-retry preserves the latest
             text the user actually saw.  Never writes for a superseded
             generation — an orphan must not touch the successor's slot.
             """
+            if consumer.attempt_armed:
+                consumer.record_cancelled_partial()
+                consumer.end_attempt()
 
             def _publish_partial() -> None:
                 if (
@@ -14646,6 +14675,11 @@ class ChatSession:
                 allow_cancelled=True,
             )
 
+        def _discard_failed_stream() -> None:
+            """Finalize rejected display state while the caller owns its generation."""
+            self.ui.on_stream_end()
+            self._ui_stream_discarded()
+
         with self._recovered_serving_failures() as recovered_failures:
             while True:
                 try:
@@ -14661,6 +14695,8 @@ class ChatSession:
                     # commits as complete and its tool calls execute.
                     self._check_cancelled(my_generation)
                     consumer.finish_stream()
+                    if is_empty_completion(result):
+                        raise _EmptyCompletionError(result)
                     # Finalization emits terminal warnings/stream_end and may
                     # legalize a truncated result.  Keep that complete policy step
                     # on the same owner rail as the carry flush above so a force
@@ -14679,8 +14715,6 @@ class ChatSession:
                     # after a death) — finalize the streamed display if the
                     # attempt got a stream, then preserve the window's best
                     # partial.
-                    if consumer.attempt_armed:
-                        consumer.record_cancelled_partial()
                     _promote_dead_partial()
                     raise
                 except KeyboardInterrupt:
@@ -14712,13 +14746,39 @@ class ChatSession:
                     dead_partial = new_dead or dead_partial
                     if attempt_provenance is not None and (new_dead or dead_provenance is None):
                         dead_provenance = attempt_provenance
-                    if armed:
-                        # The partial is captured, so there is no live attempt
-                        # until the next ``begin_attempt``: without this, a
-                        # Stop or a walk-preamble failure landing in the
-                        # re-create window reads the DEAD attempt's armed
-                        # state (see ``end_attempt``).
-                        consumer.end_attempt()
+                    if isinstance(e, _EmptyCompletionError) and failed_lane is not None:
+                        # This call completed and was billed. A same-generation
+                        # Stop still accounts for it, like an accepted result;
+                        # supersession and shutdown remain fenced. Budget checks
+                        # do not calibrate or append the rejected answer.
+                        def _commit_usage(
+                            durable: list[Callable[[], None]],
+                            serving_model: str = failed_lane.model,
+                        ) -> None:
+                            self._update_token_budget()
+                            self._print_status_line(
+                                model=serving_model,
+                                deferred_persistence=durable,
+                            )
+
+                        try:
+                            usage_committed = self._commit_for_generation(
+                                my_generation, _commit_usage
+                            )
+                        except GenerationCancelled:
+                            _promote_dead_partial()
+                            raise
+                        except BaseException:
+                            # Usage storage already logs its own failures. A UI
+                            # callback failure or conversation-persistence poison
+                            # must finalize display and remain fatal, including
+                            # when Stop races the failed commit. Never publish
+                            # over a successor or turn this into a cancel marker.
+                            self._publish_for_generation(my_generation, _discard_failed_stream)
+                            raise
+                        if not usage_committed:
+                            _promote_dead_partial()
+                            raise GenerationCancelled() from None
                     if self._cancel_event.is_set():
                         _promote_dead_partial()
                         raise GenerationCancelled() from None
@@ -14736,7 +14796,9 @@ class ChatSession:
                         # ladder + fallbacks.  Mid re-issue it must not MASK
                         # the original stream death (a closed-client re-create
                         # surfaces as a retryable APIConnectionError and would
-                        # replace the operator-actionable wording) — EXCEPT
+                        # replace the operator-actionable wording). An empty
+                        # completion does not explain a failed re-create, so
+                        # its replacement error surfaces as itself. Also exempt
                         # the classes carrying their own remediation: an
                         # overflow surfaces as ITSELF so send()'s
                         # compact-and-retry arm can recover the turn, and an
@@ -14747,6 +14809,7 @@ class ChatSession:
                         # base_url verbatim.
                         if (
                             last_stream_death is None
+                            or isinstance(last_stream_death, _EmptyCompletionError)
                             or isinstance(e, _SELF_SURFACING_ERRORS)
                             or _is_ctx_overflow(e)
                         ):
@@ -14756,7 +14819,7 @@ class ChatSession:
                             error_type=type(e).__name__,
                         )
                         raise last_stream_death from None
-                    # The terminal predicate is the SHARED _stop_retrying,
+                    # Transport failures use the shared _stop_retrying,
                     # capped at _MID_STREAM_RETRIES, judged by the lane that
                     # ACTUALLY armed this stream (a fallback's retryable set
                     # can differ, e.g. ResponsesStreamFailedError).  The
@@ -14767,9 +14830,21 @@ class ChatSession:
                     serving_lane = consumer.lane
                     if serving_lane is None:
                         raise RuntimeError("armed stream has no serving model lane") from e
-                    if self._stop_retrying(
-                        e, attempt, serving_lane, max_retries=self._MID_STREAM_RETRIES
-                    ):
+                    if isinstance(e, _EmptyCompletionError):
+                        # Share the two-reissue budget with transport failures.
+                        # Each reissue resends the full context and can repeat
+                        # its latency/cost; this caps attempts, not wall time.
+                        # Reasoning followed by stop does not establish refusal.
+                        terminal = (
+                            attempt >= self._MID_STREAM_RETRIES
+                            or e.result.native_tools_enabled is not False
+                            or self._budget_exhausted
+                        )
+                    else:
+                        terminal = self._stop_retrying(
+                            e, attempt, serving_lane, max_retries=self._MID_STREAM_RETRIES
+                        )
+                    if terminal:
                         # Terminal: finalize AND discard, exactly like the
                         # retry arm.  Keeping the buffers bought nothing — the
                         # fatal path's _emit_state("error") drains and wipes
@@ -14786,8 +14861,7 @@ class ChatSession:
                             ):
                                 _promote_dead_partial()
                                 raise GenerationCancelled() from None
-                            self.ui.on_stream_end()
-                            self._ui_stream_discarded()
+                            _discard_failed_stream()
                         raise  # fatal path otherwise unchanged
                     # This death supersedes the previous one: drop the older
                     # snapshot here rather than at the ladder's exit, so a long
@@ -14839,10 +14913,19 @@ class ChatSession:
                             _promote_dead_partial()
                             raise GenerationCancelled() from None
                         self.ui.on_stream_end()
+                        notice = (
+                            "model returned no answer"
+                            if isinstance(e, _EmptyCompletionError)
+                            else f"stream died mid-response ({cause})"
+                        )
                         self.ui.on_info(
-                            f"[stream died mid-response ({cause}) — retrying in "
+                            f"[{notice} — retrying in "
                             f"{delay:.0f}s ({attempt}/{self._MID_STREAM_RETRIES})]"
                         )
+                    # Keep the consumer armed until its stream_end is emitted:
+                    # Stop during rejection/usage publication must still flush
+                    # and finalize it. Backoff and re-creation have no live attempt.
+                    consumer.end_attempt()
                     try:
                         self._backoff_or_cancelled(delay, my_generation)
                         # Retry preparation is one generation publication.  A
@@ -15193,14 +15276,18 @@ class ChatSession:
         # _remaining_token_budget() can estimate only the delta.
         self._calibrated_msg_count = len(self.messages)
 
-        # Token budget tracking
-        if self._token_budget > 0:
-            total = prompt_tok + compl_tok
-            if not self._budget_warned and total >= self._token_budget * 0.8:
-                self._budget_warned = True
-                self.ui.on_info(f"Token budget 80% consumed ({total:,}/{self._token_budget:,})")
-            if total >= self._token_budget:
-                self._budget_exhausted = True
+        self._update_token_budget()
+
+    def _update_token_budget(self) -> None:
+        """Apply the per-completion budget to accepted and rejected responses."""
+        if not self._last_usage or self._token_budget <= 0:
+            return
+        total = self._last_usage["prompt_tokens"] + self._last_usage["completion_tokens"]
+        if not self._budget_warned and total >= self._token_budget * 0.8:
+            self._budget_warned = True
+            self.ui.on_info(f"Token budget 80% consumed ({total:,}/{self._token_budget:,})")
+        if total >= self._token_budget:
+            self._budget_exhausted = True
 
     def _print_status_line(
         self,
@@ -20485,9 +20572,14 @@ class ChatSession:
         Drains in ``_emit_pending_user_nudges`` and is appended as a
         first-class ``{"role": "system"}`` turn AFTER the user turn.  Used
         for nudges that respond to the user's message: ``correction``,
-        ``resume``, ``completion``. (``denial`` is user
-        behaviour too, but it responds to a specific TOOL BATCH — it
-        rides the tool channel so it lands with the denied results.)
+        ``completion``. (``denial`` is user behaviour too, but it responds
+        to a specific TOOL BATCH — it rides the tool channel so it lands
+        with the denied results.)
+
+        Every caller runs inside the send that drains the entry: the
+        ``"user"`` channel is not wake-eligible (``WAKE_PENDING``), so an
+        entry queued here can never manufacture a synthetic user turn of
+        its own — it waits for the user's real one.
 
         No-ops while the session is inside a wake-driven turn
         (``_wake_source_tag`` set) so model behaviour during the wake
@@ -20517,9 +20609,8 @@ class ChatSession:
         the system turns sit after the user turn they advise (uniform attach
         rule).  Each drained nudge becomes one ``{"role": "system",
         "_source": <nudge_type>, ...}`` turn via :meth:`_append_system_turn`
-        — the source is the nudge type (``correction`` / ``resume`` /
-        ``completion`` / ``idle_children`` /
-        ``watch_triggered``) and any optional metadata (e.g.
+        — the source is the nudge type (``correction`` / ``completion`` /
+        ``idle_children`` / ``watch_triggered``) and any optional metadata (e.g.
         ``watch_triggered``'s ``watch_name``) rides as sibling keys.
         ``_append_system_turn`` persists each row and fires the live
         ``on_system_turn`` SSE hook so reconnecting / multi-tab consumers
@@ -20836,26 +20927,24 @@ class ChatSession:
                 # ``requeue`` keeps seq (a re-queued poll-4 still renders
                 # before poll-5 on the retry) and the ``valid_until``
                 # predicate (a stale notice stays droppable), while quiet
-                # keeps the entry OUT of the wake gate.  A ``"user"``
-                # advisory is deliberately DROPPED instead: re-queueing it
-                # wake-eligible re-arms ``_retry_pending_wake``'s zero-
-                # backoff worker-exit gate — a repeatable pre-consumption
-                # send failure would respawn wake workers in an unbounded
-                # hot loop (persisting an orphan synthetic user turn per
-                # spin).  Losing a generation-scoped metacog hint on a
-                # rare failed wake is the strictly smaller harm.  A
-                # ``"wake"``-channel idle nudge is DROPPED for the union
-                # of both reasons: quiet would deliver it at the user/tool
-                # seams its channel exists to be invisible to, and
-                # re-queueing it wake-eligible is the same hot loop as the
-                # ``"user"`` case.  Dropping a charged entry is this
+                # keeps the entry OUT of the wake gate.  A
+                # ``"wake"``-channel idle nudge is DROPPED instead, for two
+                # reasons: quiet would deliver it at the user/tool seams
+                # its channel exists to be invisible to, and re-queueing it
+                # wake-eligible would re-arm ``_retry_pending_wake``'s
+                # zero-backoff worker-exit gate — a repeatable
+                # pre-consumption send failure would respawn wake workers
+                # in an unbounded hot loop (persisting an orphan synthetic
+                # user turn per spin).  Dropping a charged entry is this
                 # class's standing fail-closed price; the next genuine
-                # idle bracket re-derives it over fresh reads.
+                # idle bracket re-derives it over fresh reads.  (The wake
+                # drains only ``WAKE_PENDING`` and ``QUIET_DRAIN``, so a
+                # ``"user"`` entry never reaches this arm.)
                 for reminder in undelivered:
                     recovered = entry_by_reminder.get(id(reminder))
                     if recovered is None or not recovered.text:
                         continue
-                    if recovered.channel in ("user", WAKE_CHANNEL):
+                    if recovered.channel == WAKE_CHANNEL:
                         log.debug(
                             "wake_nudge.advisory_dropped ws=%s type=%s channel=%s",
                             self._ws_id[:8],
@@ -27820,12 +27909,12 @@ class ChatSession:
             content_type=stored_mime,
             size=len(body),
         )
-        filename = title if "." in title else f"preview-{kind}"
+        filename = preview_filename(name_hint, stored_mime, is_url=target_kind == "url")
         preview_record = (
             descriptor,
             Attachment(
                 attachment_id=blob_id,
-                filename=filename[:120],
+                filename=filename,
                 mime_type=stored_mime,
                 kind=PREVIEW_BLOB_KIND,
                 content=body,
@@ -28028,6 +28117,8 @@ class ChatSession:
                 self.ui.on_info("\n".join(lines))
 
         elif cmd == "/resume":
+            from turnstone.core.node_affinity import NodeAffinityError
+
             if not arg:
                 self.ui.on_info(
                     "Usage: /resume <alias_or_ws_id>\nUse /workstreams to list available workstreams."
@@ -28045,7 +28136,7 @@ class ChatSession:
                     self._drain_queue_for_identity_swap()
                     try:
                         resumed: bool | None = self.resume(target_id)
-                    except ValueError as exc:
+                    except (ValueError, NodeAffinityError) as exc:
                         # Corrupt stamp or MCP-lever refusal: resume parses
                         # before mutating, so this session is untouched —
                         # report and stay on the current workstream.

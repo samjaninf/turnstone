@@ -12,6 +12,100 @@ that minor, so the current stable line never has two independently writable
 branches. Earlier stable lines (`stable/1.7`, `stable/1.6`, `stable/1.5`) are
 frozen.
 
+## [1.8.3]
+
+Turnstone 1.8.3 makes scheduled work easier to launch, keeps conversations and node placement intact
+across restarts, strengthens sign-in and session permissions, and improves the everyday browser
+controls. It also adds GPT-6 Astra support and downloadable previews.
+
+> **Before upgrading:** this release advances the database schema from migration 072 to 076, adding
+> schedule time zones, correcting stored one-shot times, and recording channel owners and required
+> execution nodes. Migrations run automatically. Existing recurring schedules keep their UTC timing;
+> edit their time zone to switch to local time. Older Discord threads without a saved invoker need
+> a new `/ask` conversation. An administrator must assign roles to local accounts that have none.
+
+### Added
+
+- **Scheduled tasks from the dashboard (#1090).** Choose Scheduled in the launcher, enter the task,
+  and pick Daily, Weekly, Monthly, Interval, Once, or Cron. The launcher and Admin Schedules share
+  a timing builder showing upcoming runs in your local time; saving confirms the first run.
+- **Recurring schedules in your time zone (#1091, #1097).** Schedules created in the browser use its
+  time zone and retain it when edited. Daily, weekly, and monthly times follow daylight-saving
+  changes, with a fixed time firing once during the repeated fall-back hour. The API and both SDKs
+  accept a time zone. Invalid zones and impossible dates are rejected with an explanation.
+- **GPT-6 Astra.** The OpenAI provider recognizes `gpt-6-astra`, including its context and output
+  limits, reasoning levels, vision, PDF input, tool search, and mid-conversation instructions.
+  Responses history also preserves the distinction between commentary and final answers, and their
+  order around tool calls, independently of whether reasoning replay is enabled.
+- **Visible approval reminders.** A persistent status-bar chip counts pending approvals and reveals
+  the waiting card, including cards inside collapsed task agents. Coordinators also have a clickable
+  approval count for child workstreams.
+- **Preview downloads.** Download the original file from a preview, including the complete table
+  when the displayed data is sorted or capped. Downloads retain the source filename and stay tied to
+  the originating workstream and node after navigation or reload.
+
+### Changed
+
+- **Clearer pane controls.** Each tab has a dismiss button: `−` hides a regular split pane while
+  keeping its tab; `×` closes a closable tab or preview. A chevron opens the pane menu with mouse
+  or keyboard. The active tab and pane agree visually, hidden tabs remain closable, and controls
+  stay visible when the tab strip overflows.
+- **Reasoning progress with elapsed time.** Interactive and coordinator views share a Reasoning
+  indicator and live clock in both Default and Compact modes. The clock measures what the browser
+  observed; restored history does not invent a duration.
+- **More readable light-theme indicators (#1092, #1094).** Darker accent colors improve contrast for
+  launcher labels, badges, buttons, and approval reminders.
+
+### Fixed
+
+- **Schedule dispatch and completion (#1099).** A firing is recorded as successful only after a node
+  creates the workstream. Definite failures retry about once a minute for five minutes, keeping
+  that deadline across console restarts. Uncertain results and partial fan-out success are reported
+  without retrying jobs that may already be running. One-shot status reflects whether the run
+  happened, including after re-arming or conversion from cron.
+- **One-shot times and schedule validation (#1096, #1098).** One-shot schedules honor their UTC
+  offset, including schedules stored before upgrading. Explicit null fields are rejected with
+  the field named, preventing accidental disabling or names saved as `"None"`.
+- **Discord and Slack conversation recovery (#1067).** Restarts, idle eviction, and missing event
+  streams no longer discard a channel's saved conversation. The next authorized message restores its
+  history and subscription. Recovery uses the exact saved identity and preserves the route when a
+  node is temporarily unreachable; concurrent recovery cannot overwrite another replacement.
+- **Persistent node placement (#1106).** A workstream explicitly assigned to a node stays there
+  after restart, close, idle timeout, or eviction. Reopening and routing honor that requirement
+  instead of silently moving execution. Forks inherit it unless a new destination is chosen.
+- **Reopening without an extra turn.** Restoring a workstream no longer launches a redundant
+  memory search. A message sent during reopening starts its own turn.
+- **Empty model completions (#1070).** A response with no answer or tool call now retries within a
+  bounded budget when no server-side tools may have run. Otherwise it reports an actionable error
+  instead of silently completing. Provider refusals remain visible.
+- **MCP timeouts (#951).** A caller's wait deadline cancels its local waiter without marking the
+  server unhealthy or opening its circuit breaker. Server-reported timeouts still count as failures.
+- **MCP OAuth registration and refresh (#1081, #1082).** Servers keep their resolved issuer when
+  discovery metadata comes from cache, so token refresh uses the right issuer. Client registration
+  no longer sends an unrelated resource parameter that authorization servers may reject.
+- **Shared Docker authentication setup (#1062, #1064).** Both Docker stacks can mount one private
+  `config.toml` for the console and nodes, sharing the encryption key and callback configuration for
+  MCP OAuth. The installer can prepare it once and preserves it on reruns. The guides cover local
+  login, SSO, delegated access, and remote callback registration.
+- **Operator access to saved history.** Authorized project members can list and reopen interactive
+  history without coordinator administration permissions. Read-only users can inspect and export
+  history; reopening or deleting requires write access. Nodes also enforce project and coordinator
+  permissions when requests arrive directly or through the console.
+- **Sign-in recovery on page load.** Rejected or outdated credentials reliably return the browser to
+  sign-in, including when the initial identity check races other requests. An older response cannot
+  erase a newer authenticated session.
+
+### Security
+
+- **Session creation and renewal use current permissions.** Password and OIDC sessions require
+  active role permissions. Permission-store outages return a retryable error without extending stale
+  permissions or clearing the existing cookie. Only human password/OIDC sessions can renew through
+  the public refresh endpoint. API-token sessions retain their explicit scopes and fixed expiry;
+  login no longer exchanges JWTs for fresh sessions. `turnstone-admin create-user` assigns viewer
+  access explicitly.
+- **Discord thread ownership survives recovery.** Only the original linked invoker can continue or
+  close the conversation. Another linked user cannot claim a bot-owned thread.
+
 ## [1.8.2]
 
 Turnstone 1.8.2 moves model endpoints entirely into model definitions and

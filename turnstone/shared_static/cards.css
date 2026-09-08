@@ -112,8 +112,8 @@
   /* Dark-theme --red (#f87171) on #fff is only 3.0:1 — below WCAG AA
      for normal text on a destructive button.  Use the deeper red
      (#dc2626 → 4.85:1) on the filled state so the button label clears
-     AA in the default theme. Light theme already uses --red (#b91c1c,
-     5.9:1) and stays put — the override below pins it. */
+     AA in the default theme. Light theme uses --red (#991b1b,
+     8.3:1) and stays put — the override below pins it. */
   background: #dc2626;
   color: #fff;
   border: none;
@@ -289,13 +289,12 @@
    near-zero --row-alt vanishes on a long list) and full-opacity muted text
    (AA-legible colours, no opacity hacks).  Idle-dimming is avoided at the
    source — renderSessionRow only sets data-state for `error`. */
-/* Saved rows are always interactive — resume on click, or toggle a checkbox
-   in delete mode — so they own the pointer cursor here rather than relying on
-   each app's `.dash-row` convention.  The server sets `cursor: pointer` on
-   every `.dash-row`; the console scopes it to `.dash-row.has-link` (a class
-   the shared row builder doesn't set), so without this the console's saved
-   rows fell back to the base `cursor: default`. */
+/* Metadata remains readable when the caller cannot resume or delete. */
 .saved-row {
+  cursor: default;
+}
+.saved-row[role="button"],
+.saved-row.ws-delete-mode {
   cursor: pointer;
 }
 .saved-row .dash-row-main {
@@ -438,5 +437,5 @@
   background: rgba(248, 113, 113, 0.08);
 }
 [data-theme="light"] .dash-row.ws-selected {
-  background: rgba(220, 38, 38, 0.08);
+  background: color-mix(in srgb, var(--red) 8%, transparent);
 }

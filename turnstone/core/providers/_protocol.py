@@ -47,13 +47,36 @@ class UsageInfo:
 
 @dataclass(frozen=True, slots=True)
 class ProviderRequestMetrics:
-    """Non-sensitive prompt-shape metrics from one prepared provider request.
+    """Non-sensitive facts from one prepared provider request.
 
     Adapters record these only after their provider-native tool conversion is
     complete.  Payloads, headers, and credentials never leave the adapter.
     """
 
     serialized_tool_chars: int = 0
+    native_tools_enabled: bool | None = None
+
+
+def request_uses_native_tools(
+    kwargs: dict[str, Any], *, client_tool_types: tuple[str | None, ...] = ("function",)
+) -> bool:
+    """Conservatively detect server tools in the final request, including overrides.
+
+    An empty web-search configuration enables search. Unknown tool shapes also
+    prevent a caller from assuming that repeating the request has no effects.
+    ``client_tool_types`` lists the adapter's client-executed tool types; ``None``
+    includes dictionaries without a ``type`` key. Deferred loading alone does
+    not execute a tool; hosted discovery has its own server-tool declaration.
+    """
+    body = {**kwargs, **(kwargs.get("extra_body") or {})}
+    if body.get("web_search_options") is not None or body.get("mcp_servers") not in (None, []):
+        return True
+    tools = body.get("tools")
+    if tools is None:
+        return False
+    return not isinstance(tools, list) or any(
+        not isinstance(tool, dict) or tool.get("type") not in client_tool_types for tool in tools
+    )
 
 
 def serialized_tool_chars(tools: Any) -> int:
@@ -576,11 +599,11 @@ class ModelCapabilities:
     # Mid-conversation system messages: append ``{"role": "system"}`` to the
     # ``messages`` array (rather than editing the top-level ``system`` field) to
     # add operator-level instructions partway through a session without
-    # invalidating the cached prefix.  When False, ``system``-role messages must
-    # be hoisted into the top-level ``system`` param (the universal fallback).
-    # Available on the Claude API only (NOT Bedrock / Vertex / Foundry), on
-    # every row that sets this flag (validated header-less on claude-opus-4-8;
-    # documented wire surface); no beta header required.
+    # invalidating the cached prefix. When False, lowering folds operator turns
+    # into nonce-fenced reminders on the preceding input turn. Native Anthropic
+    # rows use inline Messages system blocks; native OpenAI Responses rows use
+    # system/developer input messages. Provider converters hoist only leading
+    # instructions on native lanes. No beta header is required.
     supports_mid_conversation_system: bool = False
     # Phase 3 reranker calibration — populated by calibrate-on-detect; read by
     # ChatSession._bm25_rerank_threshold. A non-empty rerank_scale is the

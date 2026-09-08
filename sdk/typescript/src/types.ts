@@ -28,6 +28,7 @@ export interface AuthLoginRequest {
 }
 
 export interface AuthLoginResponse {
+  can_refresh?: boolean;
   status: string;
   role: string;
   scopes?: string;
@@ -42,6 +43,7 @@ export interface AuthStatusResponse {
 }
 
 export interface AuthSetupResponse {
+  can_refresh?: boolean;
   status: string;
   user_id: string;
   username: string;
@@ -169,6 +171,10 @@ export interface CreateWorkstreamRequest {
    */
   user_id?: string;
   resume_ws?: string;
+  /** Require an exact source ID; disable alias and prefix resolution. */
+  resume_ws_exact?: boolean;
+  /** Durable execution requirement. Omission inherits the fork source requirement. */
+  required_node_id?: string | null;
   /** Completion-notification targets as JSON text or structured target objects. */
   notify_targets?: string | Array<Record<string, string>>;
   /** Client surface label such as web, cli, chat, or scheduled. */
@@ -603,6 +609,7 @@ export interface ClusterSnapshotResponse {
 }
 
 export interface ConsoleCreateWsRequest {
+  /** Specific IDs require that node; auto/pool choose initial placement only. */
   node_id?: string;
   name?: string;
   model?: string;
@@ -613,6 +620,8 @@ export interface ConsoleCreateWsRequest {
   /** Project to attach the workstream to. */
   project_id?: string;
   resume_ws?: string;
+  resume_ws_exact?: boolean;
+  required_node_id?: string | null;
   /** Override judge model alias for this workstream. */
   judge_model?: string;
 }
@@ -624,7 +633,7 @@ export interface ConsoleCreateWsResponse {
 }
 
 export interface RouteCreateRequest extends CreateWorkstreamRequest {
-  /** Pin placement to this node by generating a matching rendezvous key. */
+  /** Require execution on this node, including when forking saved history. */
   target_node?: string;
 }
 
@@ -659,6 +668,8 @@ export interface CreateScheduleRequest {
   description?: string;
   cron_expr?: string;
   at_time?: string;
+  /** IANA zone the cron is evaluated in (e.g. America/New_York); default UTC. */
+  timezone?: string;
   target_mode?: string;
   model?: string;
   auto_approve?: boolean;
@@ -672,6 +683,7 @@ export interface UpdateScheduleRequest {
   schedule_type?: string;
   cron_expr?: string;
   at_time?: string;
+  timezone?: string;
   target_mode?: string;
   model?: string;
   initial_message?: string;
@@ -687,6 +699,7 @@ export interface ScheduleInfo {
   schedule_type: string;
   cron_expr: string;
   at_time: string;
+  timezone: string;
   target_mode: string;
   model: string;
   initial_message: string;

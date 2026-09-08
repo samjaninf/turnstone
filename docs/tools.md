@@ -446,20 +446,21 @@ Show the user rich content in a preview pane beside the conversation.
 | `kind`    | string | no       | Rendering override: `web`, `pdf`, `image`, `table`, `text`, or `markdown`. Detected from the content when omitted. |
 | `title`   | string | no       | Pane header title. Defaults to the page title, filename, or URL. |
 
-- **What it does**: Resolves the target to bytes (URLs fetch through the same
-  SSRF-guarded path as `web_fetch`, screened per redirect hop, honoring the
-  same `tools.allow_private_network` opt-in), classifies the
-  content, stores it content-addressed against the workstream, and opens the
-  frontend preview pane beside the conversation: web pages render in a fully
-  sandboxed iframe (no scripts, opaque origin), PDFs in the browser viewer,
-  images inline, CSV/TSV/JSON as a sortable table, text/markdown rendered. A
-  previewed web page loads none of its remote images or styles by default, so
-  opening it never reveals the viewer to the page's site; a toggle in the pane
-  header turns remote content back on for that preview. The
-  model receives only a one-line confirmation — to reason about content, use
-  `web_fetch` / `read_file` instead. Preview content is size-capped per kind
-  (pages 4 MB, PDFs 32 MB, images 4 MB, tables 2 MB, text 512 KB) and GC'd
-  with the workstream.
+- **What it does**: Resolves the target to bytes (URLs fetch through the same SSRF-guarded path as
+  `web_fetch`, screened per redirect hop, honoring the same `tools.allow_private_network` opt-in),
+  classifies the content, stores it content-addressed against the workstream, and opens the frontend
+  preview pane beside the conversation: web pages render in a fully sandboxed iframe (no scripts,
+  opaque origin), PDFs in the browser viewer, images inline, CSV/TSV/JSON as a sortable table,
+  text/markdown rendered. A previewed web page loads none of its remote images or styles by default,
+  so opening it never reveals the viewer to the page's site; a toggle in the pane header turns
+  remote content back on for that preview. **Download** saves the stored preview file, including the
+  complete CSV/TSV/JSON when the table display is capped or sorted. Text downloads use the preview's
+  UTF-8 encoding; fetched HTML includes its base URL for relative links and assets. Newly stored
+  previews derive their filename from the source where available, independently of the pane title.
+  Downloads reuse that stored name with an ASCII-safe fallback. The model receives only a one-line
+  confirmation — to reason about content, use `web_fetch` / `read_file` instead. Preview content is
+  size-capped per kind (pages 4 MB, PDFs 32 MB, images 4 MB, tables 2 MB, text 512 KB) and GC'd with
+  the workstream.
 - **Auto-approve**: URL targets require confirmation (network access); file
   paths and `attachment:` targets run unprompted (local reads).
 - **Agent availability**: interactive sessions only (not `task_agent`, not
@@ -817,6 +818,15 @@ MCP-compatible service.
 5. **Dispatch**: When the LLM calls an MCP tool, `_prepare_mcp_tool()` builds a
    generic approval preview and `_exec_mcp_tool()` calls `MCPClientManager.call_tool_sync()`,
    which dispatches the call to the background asyncio event loop.
+
+   If the caller's timeout expires, turnstone cancels its local wait without changing
+   the server's circuit-breaker failure count. This also applies to resource reads,
+   prompt retrievals, and calls still waiting for a per-user session lock. Observed
+   transport failures still count. Static reconnection precedes the operation timeout;
+   per-user calls include token lookup, connection, and lock waiting in their budget.
+   A timeout does not confirm remote cancellation: the server may continue working,
+   and timed-out tool calls retain an unknown outcome. A connected server that never
+   answers can continue to consume each caller's timeout budget.
 
 ### Approval behavior
 

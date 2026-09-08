@@ -213,6 +213,17 @@ class RewindRequest(BaseModel):
 
 
 class CreateWorkstreamRequest(BaseModel):
+    required_node_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        pattern=r"^[A-Za-z0-9_.-]+$",
+        description=(
+            "Required execution node. Omission permits automatic placement for a fresh "
+            "workstream and inherits the source requirement for a fork. An explicit "
+            "destination applies only to the new workstream ID."
+        ),
+    )
     name: str = Field(default="", description="Workstream display name (auto-generated if empty)")
     model: str = Field(default="", description="Model alias from registry")
     judge_model: str = Field(
@@ -244,6 +255,10 @@ class CreateWorkstreamRequest(BaseModel):
             "Source workstream ID or alias to fork atomically into the new "
             "workstream (empty = fresh start)"
         ),
+    )
+    resume_ws_exact: bool = Field(
+        default=False,
+        description="Require an exact source ID in resume_ws; disable alias and prefix resolution",
     )
     skill: str = Field(default="", description="Skill name (replaces default skills)")
     persona: str = Field(

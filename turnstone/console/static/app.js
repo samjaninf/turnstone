@@ -103,7 +103,8 @@ const STATE_DISPLAY = {
 const PERSISTENCE_DISPLAY = {
   pending: {
     label: "History save pending",
-    tooltip: "An accepted conversation turn has not reached durable history yet.",
+    tooltip:
+      "An accepted conversation turn has not reached durable history yet.",
   },
   retrying: {
     label: "History save retrying",
@@ -1038,7 +1039,7 @@ window.addEventListener("popstate", function (e) {
 function _hasCoordPermission() {
   // Deny-on-absent parse lives in the shared hasPermission (auth.js, the
   // module that populates the storage) — one contract for every surface.
-  return _consoleHasPermission("admin.coordinator");
+  return _consoleHasPermission(_launcherPerm("coordinator"));
 }
 
 // POST /v1/api/workstreams/new.  Accepts the three request fields
@@ -1131,14 +1132,76 @@ function _createCoordinator(opts) {
     });
 }
 
-function _hasInteractivePermission() {
-  return _consoleHasPermission("workstreams.create");
+// Which workstream KIND the launcher creates: "coordinator" (console-local),
+// "interactive" (proxied to a compute node), or "scheduled" (an interactive
+// session the console's scheduler starts later, on a timer).  The composer
+// is shared; only the field set, the submit endpoint and what follows differ.
+let _launcherKind = "coordinator";
+
+// The kinds in toggle order, each with its radio id and the ONE place its
+// permission is named: the gate (`can`) reads `perm` (as does
+// _hasCoordPermission, for its other caller), so the refusal toast can never
+// name a permission the gate stopped checking.  The click wiring, the
+// arrow-key cycle, the availability fallback and the submit gate all walk
+// this list.
+const _LAUNCHER_KINDS = [
+  { kind: "coordinator", id: "kind-coordinator", perm: "admin.coordinator" },
+  { kind: "interactive", id: "kind-interactive", perm: "workstreams.create" },
+  { kind: "scheduled", id: "kind-scheduled", perm: "admin.schedules" },
+].map(function (k) {
+  k.can = function () {
+    return _consoleHasPermission(k.perm);
+  };
+  return k;
+});
+
+function _launcherPerm(kind) {
+  const entry = _LAUNCHER_KINDS.find(function (k) {
+    return k.kind === kind;
+  });
+  return entry ? entry.perm : "";
 }
 
-// Which workstream KIND the launcher creates: "coordinator" (console-local)
-// or "interactive" (proxied to a compute node).  The composer is shared; only
-// the submit endpoint + redirect differ.
-let _launcherKind = "coordinator";
+// The kind an arrow key lands on: the neighbour of `current` in `avail`
+// (wrapping at either end), or an end of the list when `current` is no
+// longer offered (a permission refresh mid-session).
+function _nextLauncherKind(current, avail, back) {
+  if (!avail.length) return current;
+  const at = avail.indexOf(current);
+  if (at === -1) return back ? avail[avail.length - 1] : avail[0];
+  return avail[(at + (back ? -1 : 1) + avail.length) % avail.length];
+}
+
+// A schedule dispatches an interactive workstream, so the Scheduled kind
+// draws its personas from the interactive shelf.
+function _launcherPersonaKind() {
+  return _launcherKind === "scheduled" ? "interactive" : _launcherKind;
+}
+
+// The When builder under the composer (Scheduled kind).  Mounted once with
+// the composer from the shared template; hidden with its section otherwise.
+let _launcherWhen = null;
+
+// Shown when files are staged in the Scheduled kind — at the switch (the
+// paperclip that staged them has just disappeared) and again at submit —
+// and, without the "remove them" clause, when a file is dropped on the
+// composer in that kind (nothing is staged then).
+const _SCHEDULE_NO_FILES_MSG =
+  "A schedule can't carry attachments; remove them first.";
+const _SCHEDULE_NO_DROP_MSG = "A schedule can't carry attachments.";
+
+// No try/catch around the constructor on purpose: the template, this mount
+// and the builder script ship in the one index.html, served no-cache with
+// content ETags, so a page can never load a newer app.js than its own
+// markup — a missing template is a build error, not a runtime state.  The
+// null checks below (and the "failed to load" message in _createSchedule)
+// only keep the rest of the launcher usable if that ever regresses.
+function _mountLauncherWhen() {
+  const mount = document.getElementById("launcher-when-mount");
+  const SB = window.TurnstoneScheduleBuilder;
+  if (!mount || !SB || _launcherWhen) return;
+  _launcherWhen = new SB.ScheduleBuilder(mount);
+}
 
 // Sentinel value for the project picker's "+ New project…" row — selecting it
 // prompts for a name, creates, then re-selects the new project (see
@@ -1147,14 +1210,11 @@ const _PROJECT_NEW = "__new__";
 
 function _setLauncherKind(kind, focus) {
   _launcherKind = kind;
-  const map = {
-    "kind-coordinator": "coordinator",
-    "kind-interactive": "interactive",
-  };
-  Object.keys(map).forEach(function (id) {
-    const btn = document.getElementById(id);
+  _homeShowError(""); // a message about the previous kind no longer applies
+  _LAUNCHER_KINDS.forEach(function (k) {
+    const btn = document.getElementById(k.id);
     if (!btn) return;
-    const on = map[id] === kind;
+    const on = k.kind === kind;
     btn.classList.toggle("active", on);
     btn.setAttribute("aria-checked", on ? "true" : "false");
     btn.tabIndex = on ? 0 : -1; // roving tabindex — the radiogroup is one tab stop
@@ -1167,23 +1227,57 @@ function _setLauncherKind(kind, focus) {
 }
 
 // Reflect the active kind in the shared launcher composer: the task-prompt
-// hint, and which option fields are relevant.  The node picker is
-// interactive-only (coordinators run in the console, not on a compute node);
-// its node list appears only under the "Specific node" strategy.
+// hint, the send label, and which option fields are relevant.  Node
+// placement applies to every kind that runs on a compute node (interactive
+// and scheduled; coordinators run in the console); its node list appears
+// only under the "Specific node" strategy.  The Scheduled kind drops the
+// judge model and attachments (a schedule carries neither) and reveals the
+// When builder beneath the composer.
 function _applyLauncherFields() {
   if (!_homeCoordComposer) return;
-  const interactive = _launcherKind === "interactive";
+  const scheduled = _launcherKind === "scheduled";
+  const onNode = _launcherKind !== "coordinator";
   _homeCoordComposer.setPlaceholder(
-    interactive
-      ? "What do you want to work on?"
-      : "What should this coordinator orchestrate?",
+    scheduled
+      ? "What should run on this schedule?"
+      : onNode
+        ? "What do you want to work on?"
+        : "What should this coordinator orchestrate?",
   );
-  _homeCoordComposer.setOptionFieldVisible("node_strategy", interactive);
+  _homeCoordComposer.setSendLabel(
+    scheduled ? "Schedule" : "Start",
+    scheduled ? "Scheduling…" : "Starting…",
+  );
+  _homeCoordComposer.setOptionFieldVisible("node_strategy", onNode);
   const specific =
-    interactive &&
-    _homeCoordComposer.getOptionValue("node_strategy") === "node";
+    onNode && _homeCoordComposer.getOptionValue("node_strategy") === "node";
   _homeCoordComposer.setOptionFieldVisible("node_id", specific);
   if (specific) _populateLauncherNodes();
+  _homeCoordComposer.setOptionFieldVisible("judge_model", !scheduled);
+  _homeCoordComposer.setAttachVisible(!scheduled);
+  // A schedule's name is derived client-side (the Name option stays
+  // optional); the other kinds get a server-generated name.
+  _homeCoordComposer.setOptionPlaceholder(
+    "name",
+    scheduled ? "Named from the task's first line" : "Auto-generated if empty",
+  );
+  const when = document.getElementById("launcher-when");
+  if (when && _launcherWhen) {
+    // This runs on every option change too, so act on the transitions
+    // only: preview on reveal, drop a pending preview on hide.  The block's
+    // own `hidden` is the edge on purpose — nothing else toggles it, and a
+    // tracked previous kind would be parallel state that can drift.  Files
+    // staged before the switch are refused at submit; say so now, where the
+    // paperclip that staged them has just disappeared.
+    const revealed = scheduled && when.hidden;
+    const hidden = !scheduled && !when.hidden;
+    when.hidden = !scheduled;
+    if (revealed) {
+      _launcherWhen.preview();
+      if (_homeStagedFiles.length) _homeShowError(_SCHEDULE_NO_FILES_MSG);
+    }
+    if (hidden) _launcherWhen.cancelPreview();
+  }
 
   // "+ New project…" — reset the field FIRST so the sentinel can't stick (or
   // loop on re-entry), then reveal the inline creator beneath the picker.
@@ -1226,20 +1320,16 @@ function _populateLauncherNodes() {
 
 function _wireLauncherToggle() {
   const group = document.getElementById("launcher-kinds");
-  const coordBtn = document.getElementById("kind-coordinator");
-  const intBtn = document.getElementById("kind-interactive");
-  if (coordBtn) {
-    coordBtn.addEventListener("click", function () {
-      _setLauncherKind("coordinator");
+  _LAUNCHER_KINDS.forEach(function (k) {
+    const btn = document.getElementById(k.id);
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      _setLauncherKind(k.kind);
     });
-  }
-  if (intBtn) {
-    intBtn.addEventListener("click", function () {
-      _setLauncherKind("interactive");
-    });
-  }
+  });
   if (group) {
-    // WAI-ARIA radiogroup contract: arrow keys move the selection (+ focus).
+    // WAI-ARIA radiogroup contract: arrow keys move the selection (+ focus)
+    // among the kinds this user can create, wrapping at either end.
     group.addEventListener("keydown", function (e) {
       if (
         ["ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown"].indexOf(e.key) ===
@@ -1248,18 +1338,32 @@ function _wireLauncherToggle() {
         return;
       }
       e.preventDefault();
+      const avail = _LAUNCHER_KINDS
+        .filter(function (k) {
+          return k.can();
+        })
+        .map(function (k) {
+          return k.kind;
+        });
+      if (!avail.length) return;
       const back = e.key === "ArrowLeft" || e.key === "ArrowUp";
-      const next = back
-        ? _launcherKind === "interactive"
-          ? "coordinator"
-          : "interactive"
-        : _launcherKind === "coordinator"
-          ? "interactive"
-          : "coordinator";
-      _setLauncherKind(next, true);
+      _setLauncherKind(_nextLauncherKind(_launcherKind, avail, back), true);
     });
   }
   _setLauncherKind(_launcherKind); // seed the initial roving-tabindex state
+}
+
+// Node placement from the launcher's node-strategy picker, shared by every
+// kind that runs on a compute node: "node" pins to the chosen node, anything
+// else is "auto" (the console or the scheduler picks the least-loaded node).
+// Pure — returns { placement, requiredNodeId? } or { error } without touching
+// the DOM or the busy flag, so callers validate BEFORE flipping busy and a
+// missing pick surfaces inline without a stuck spinner.
+function _resolveNodePlacement(opts) {
+  if (opts.node_strategy !== "node") return { placement: "auto" };
+  const placement = (opts.node_id || "").trim();
+  if (!placement) return { error: "Choose a node, or switch to Least loaded." };
+  return { placement: placement, requiredNodeId: placement };
 }
 
 // POST /v1/api/cluster/workstreams/new — the console picks a node and PROXIES
@@ -1277,23 +1381,22 @@ function _createInteractive(opts) {
   const setBusy = opts.setBusy || function () {};
   const onSuccess = opts.onSuccess || function () {};
 
-  // Node placement (launcher node-strategy picker): "node" pins to the chosen
-  // node; anything else lets the console pick the least-loaded node ("auto").
-  // Validate the specific-node choice BEFORE flipping busy so a missing pick
-  // surfaces inline without a stuck spinner.
-  let placement = "auto";
-  if (opts.node_strategy === "node") {
-    placement = (opts.node_id || "").trim();
-    if (!placement) {
-      errEl.textContent = "Choose a node, or switch to Least loaded.";
-      return;
-    }
+  const placed = _resolveNodePlacement(opts);
+  if (placed.error) {
+    errEl.textContent = placed.error;
+    return;
   }
+  const placement = placed.placement;
 
   errEl.textContent = "";
   setBusy(true);
 
   const body = { node_id: placement };
+  if (placed.requiredNodeId) body.required_node_id = placed.requiredNodeId;
+  if (opts.resume_ws) {
+    body.resume_ws = opts.resume_ws;
+    body.resume_ws_exact = true;
+  }
   if (name) body.name = name;
   if (skill) body.skill = skill;
   if (persona) body.persona = persona;
@@ -1353,7 +1456,8 @@ function _createInteractive(opts) {
 }
 
 // ---------------------------------------------------------------------------
-// Home-landing session launcher (coordinator or interactive) + saved sessions.
+// Home-landing session launcher (coordinator, interactive or scheduled) +
+// saved sessions.
 // The composer renders as a persistent panel on the home view.  The
 // active list and
 // cluster summary render from clusterState, so every SSE-driven patch
@@ -1436,12 +1540,22 @@ function _homeIsAttachmentAllowed(file) {
   return false;
 }
 
-function _homeShowError(msg) {
-  const errEl = document.getElementById("home-coord-error");
-  if (!errEl) return;
+// One owner for the launcher's message row (#home-coord-error): validation
+// and request errors, and the Scheduled kind's post-submit confirmation
+// (`ok`).  The create paths write their errEl directly, but only after
+// submitHomeCoord has cleared the row through here, and a kind switch
+// clears it too — so an error never lands in a confirmation-styled row.
+function _homeShowMessage(text, ok) {
+  const el = document.getElementById("home-coord-error");
+  if (!el) return;
   // Element is always rendered (min-height reserves the row); just
   // toggle the message text so layout doesn't shift on validation.
-  errEl.textContent = msg || "";
+  el.textContent = text || "";
+  el.classList.toggle("is-ok", !!(ok && text));
+}
+
+function _homeShowError(msg) {
+  _homeShowMessage(msg, false);
 }
 
 function _homeRenderChips() {
@@ -1483,6 +1597,8 @@ function _homeRenderChips() {
       rm.onclick = function () {
         _homeStagedFiles.splice(idx, 1);
         _homeRenderChips();
+        // Whatever the row said about the files no longer applies.
+        if (!_homeStagedFiles.length) _homeShowError("");
       };
       chip.appendChild(rm);
       chipsEl.appendChild(chip);
@@ -1493,6 +1609,15 @@ function _homeRenderChips() {
 function _homeStageFile(file) {
   if (!file) return false;
   const paste = window.TurnstonePasteText;
+  if (_launcherKind === "scheduled") {
+    // No paperclip in this kind; this catches drops and pasted files.  A
+    // false return keeps a large pasted text inline — that is the right
+    // outcome for a schedule's task, so the paste case says nothing; only
+    // a real drop gets the refusal.
+    if (!(paste && paste.isPastedTextFile && paste.isPastedTextFile(file)))
+      _homeShowError(_SCHEDULE_NO_DROP_MSG);
+    return false;
+  }
   if (
     paste &&
     paste.isDuplicatePastedTextFile &&
@@ -1541,6 +1666,7 @@ function _ensureHomeComposerInit() {
   if (_homeComposerInit) return;
   _homeComposerInit = true;
   _mountHomeCoordComposer();
+  _mountLauncherWhen();
   _wireLauncherToggle();
   _refreshAndPopulateSkills();
   _refreshAndPopulateModels();
@@ -1606,10 +1732,10 @@ function _populateHomePersonaDropdown() {
   const TP = window.TurnstonePersonas;
   if (!TP) return;
   const previous = _homeCoordComposer.getOptionValue("persona");
-  const choices = TP.personaChoices(_launcherKind);
+  const choices = TP.personaChoices(_launcherPersonaKind());
   _homeCoordComposer.setOptionChoices("persona", choices);
   if (!_restorePick("persona", previous, choices)) {
-    const dflt = TP.defaultPersona(_launcherKind);
+    const dflt = TP.defaultPersona(_launcherPersonaKind());
     if (dflt) _homeCoordComposer.setOptionValue("persona", dflt.name);
   }
 }
@@ -1711,24 +1837,29 @@ function _mountHomeCoordComposer() {
         // Persona surfaces only when it's a non-default pick — the kind
         // default is the zero-touch state and needs no summary line.
         if (v.persona && window.TurnstonePersonas) {
-          const dflt = window.TurnstonePersonas.defaultPersona(_launcherKind);
+          const dflt = window.TurnstonePersonas.defaultPersona(
+            _launcherPersonaKind(),
+          );
           if (!dflt || dflt.name !== v.persona)
             bits.push(window.TurnstonePersonas.personaLabel(v.persona));
         }
         if (v.name) bits.push(v.name);
         if (v.skill) bits.push(v.skill);
         if (v.model) bits.push(v.model);
-        if (v.judge_model) bits.push("judge: " + v.judge_model);
+        // The judge model is hidden (and not sent) in the Scheduled kind.
+        if (v.judge_model && _launcherKind !== "scheduled")
+          bits.push("judge: " + v.judge_model);
         if (v.project && v.project !== _PROJECT_NEW) {
           const pn = window.TurnstoneProjects
             ? window.TurnstoneProjects.projectName(v.project)
             : "";
           bits.push("project: " + (pn || v.project));
         }
-        // Node placement is interactive-only; surface it only when a specific
-        // node is pinned (the "Least loaded" default needs no summary line).
+        // Node placement applies off the console only (interactive and
+        // scheduled); surface it only when a specific node is pinned (the
+        // "Least loaded" default needs no summary line).
         if (
-          _launcherKind === "interactive" &&
+          _launcherKind !== "coordinator" &&
           v.node_strategy === "node" &&
           v.node_id
         )
@@ -1926,35 +2057,35 @@ function _populateHomeModelDropdowns() {
 function _refreshHomeComposerVisibility() {
   const panel = document.getElementById("coord-composer-panel");
   if (!panel) return;
-  const canCoord = _hasCoordPermission();
-  const canInt = _hasInteractivePermission();
-  panel.style.display = canCoord || canInt ? "" : "none";
-  const coordBtn = document.getElementById("kind-coordinator");
-  const intBtn = document.getElementById("kind-interactive");
-  if (coordBtn) coordBtn.style.display = canCoord ? "" : "none";
-  if (intBtn) intBtn.style.display = canInt ? "" : "none";
+  const avail = _LAUNCHER_KINDS.filter(function (k) {
+    return k.can();
+  });
+  panel.style.display = avail.length ? "" : "none";
+  _LAUNCHER_KINDS.forEach(function (k) {
+    const btn = document.getElementById(k.id);
+    if (btn) btn.style.display = k.can() ? "" : "none";
+  });
   // Hide the toggle when only one kind is available.
   const kinds = document.getElementById("launcher-kinds");
-  if (kinds) kinds.style.display = canCoord && canInt ? "" : "none";
+  if (kinds) kinds.style.display = avail.length > 1 ? "" : "none";
   // Default to a kind the user can actually create.
-  if (_launcherKind === "coordinator" && !canCoord && canInt) {
-    _setLauncherKind("interactive");
-  } else if (_launcherKind === "interactive" && !canInt && canCoord) {
-    _setLauncherKind("coordinator");
-  }
+  const allowed = avail.some(function (k) {
+    return k.kind === _launcherKind;
+  });
+  if (!allowed && avail.length) _setLauncherKind(avail[0].kind);
 }
 
 function submitHomeCoord(textFromComposer) {
   const kind = _launcherKind;
-  if (kind === "coordinator" && !_hasCoordPermission()) {
-    showToast("admin.coordinator permission required");
-    return;
-  }
-  if (kind === "interactive" && !_hasInteractivePermission()) {
-    showToast("workstreams.create permission required");
+  const entry = _LAUNCHER_KINDS.find(function (k) {
+    return k.kind === kind;
+  });
+  if (!entry || !entry.can()) {
+    showToast((entry ? entry.perm : kind) + " permission required");
     return;
   }
   if (!_homeCoordComposer) return;
+  _homeShowError(""); // a stale confirmation must not frame a new error
   // text arg is passed when the Composer's Enter-key handler fires;
   // direct callers (Ctrl/Cmd+Enter) invoke with no argument and we
   // read from the composer.
@@ -1965,6 +2096,12 @@ function submitHomeCoord(textFromComposer) {
   // the multipart payload (the actual reset only fires on the success
   // branch, after the response lands).
   const files = _homeStagedFiles.slice();
+  // A schedule carries no attachments: refuse before the files-need-a-task
+  // guard below, whose "add a message" advice could never resolve this.
+  if (kind === "scheduled" && files.length > 0) {
+    _homeShowError(_SCHEDULE_NO_FILES_MSG);
+    return;
+  }
   // Files-without-text would upload pending attachment rows but the
   // server's _coord_create_post_install only reserves+dispatches when
   // initial_message is non-empty — uploaded files would orphan as
@@ -2004,22 +2141,176 @@ function submitHomeCoord(textFromComposer) {
     shared.node_strategy = opts.node_strategy || "auto";
     shared.node_id = (opts.node_id || "").trim();
     _createInteractive(shared);
+  } else if (kind === "scheduled") {
+    // Same placement picker as interactive; no files (refused above).
+    shared.node_strategy = opts.node_strategy || "auto";
+    shared.node_id = (opts.node_id || "").trim();
+    _createSchedule(shared);
   } else {
     shared.files = files;
     _createCoordinator(shared);
   }
 }
 
-// Ctrl/Cmd+Enter anywhere on the home page submits the coordinator
-// composer — consistent with the modal's keyboard-shortcut convention.
-// The Composer's own Enter handler already fires submitHomeCoord when
-// focus is in the textarea; this covers the case when focus sits on
-// the attach / options buttons.
+// The schedule API keeps this many characters of the initial message and of
+// the name (SCHEDULE_MESSAGE_MAX_CHARS / SCHEDULE_NAME_MAX_CHARS in
+// console/server.py; a test keeps them in step).  Counted in code points,
+// as the server counts.
+const _SCHEDULE_TASK_MAX_CHARS = 4096;
+const _SCHEDULE_NAME_MAX_CHARS = 256;
+// A derived name is cut to this many code points (ellipsis included).
+const _SCHEDULE_NAME_CUT_CHARS = 60;
+
+// Code points, as the server counts — with the cheap UTF-16 length as a
+// short-circuit so a huge pasted task is not boxed into an array just to be
+// refused (a UTF-16 length under the cap can never exceed it in code points).
+function _overCap(text, cap) {
+  return text.length > cap && Array.from(text).length > cap;
+}
+
+// A schedule needs a name (the admin list is keyed on it).  When the Name
+// option is empty, take the (trimmed, non-empty) task's first line, cut to
+// _SCHEDULE_NAME_CUT_CHARS — code points, so the cut can't split a
+// surrogate pair.
+function _scheduleNameFromTask(task) {
+  const first = task.split("\n")[0].replace(/\s+/g, " ").trim();
+  const cp = Array.from(first);
+  if (cp.length <= _SCHEDULE_NAME_CUT_CHARS) return first;
+  return (
+    cp
+      .slice(0, _SCHEDULE_NAME_CUT_CHARS - 1)
+      .join("")
+      .trimEnd() + "…"
+  );
+}
+
+// POST /v1/api/admin/schedules — store a schedule the console's scheduler
+// dispatches later as an interactive workstream on a compute node (the same
+// create the admin shelf performs, fed from the launcher's fields).  Nothing
+// opens on success, so the confirmation is inline and persistent (a toast
+// would be gone before the first-run time is read): it names the first run
+// and where the schedule is managed from here on.  The When builder keeps
+// its state on purpose — the next schedule often shares the timing.
+function _createSchedule(opts) {
+  const errEl = opts.errEl;
+  const setBusy = opts.setBusy || function () {};
+  const onSuccess = opts.onSuccess || function () {};
+  const submittedKind = _launcherKind; // busy disables send, not the toggle
+  const task = (opts.task || "").trim();
+  if (!task) {
+    errEl.textContent = "Describe what should run on this schedule.";
+    return;
+  }
+  if (_overCap(task, _SCHEDULE_TASK_MAX_CHARS)) {
+    // The server would silently keep only the first _SCHEDULE_TASK_MAX_CHARS.
+    errEl.textContent =
+      "A schedule's task is limited to " +
+      _SCHEDULE_TASK_MAX_CHARS.toLocaleString() +
+      " characters; shorten it.";
+    return;
+  }
+  const when = _launcherWhen
+    ? _launcherWhen.compile()
+    : { error: "The schedule builder failed to load." };
+  if (when.error) {
+    // Flag the builder too: an untouched mode shows its gap as a hint until
+    // a submit is refused on it (the admin shelf does the same).
+    if (_launcherWhen) _launcherWhen.showErrors();
+    errEl.textContent = when.error;
+    return;
+  }
+  // The same picker as interactive; for a schedule "auto" means the
+  // scheduler picks the node with the most headroom at dispatch time.
+  const placed = _resolveNodePlacement(opts);
+  if (placed.error) {
+    errEl.textContent = placed.error;
+    return;
+  }
+  const target = placed.placement;
+  const name = (opts.name || "").trim() || _scheduleNameFromTask(task);
+  if (_overCap(name, _SCHEDULE_NAME_MAX_CHARS)) {
+    errEl.textContent =
+      "A schedule's name is limited to " +
+      _SCHEDULE_NAME_MAX_CHARS +
+      " characters; shorten it.";
+    return;
+  }
+
+  errEl.textContent = "";
+  setBusy(true);
+
+  const body = {
+    name: name,
+    schedule_type: when.schedule_type,
+    cron_expr: when.cron_expr,
+    at_time: when.at_time,
+    timezone: when.timezone,
+    target_mode: target,
+    initial_message: task,
+    model: (opts.model || "").trim(),
+    skill: opts.skill || "",
+    persona: (opts.persona || "").trim(),
+    project_id: (opts.project_id || "").trim(),
+  };
+  authFetch("/v1/api/admin/schedules", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  })
+    .then(function (r) {
+      return r.json().then(function (data) {
+        return { ok: r.ok, status: r.status, data: data };
+      });
+    })
+    .then(function (res) {
+      setBusy(false);
+      const data = res.data || {};
+      if (!res.ok) {
+        errEl.textContent = data.error || "HTTP " + res.status;
+        return;
+      }
+      const SB = window.TurnstoneScheduleBuilder;
+      let msg = "Scheduled '" + (data.name || name) + "'";
+      if (data.next_run && SB) {
+        const rel = SB.relativeToNow(data.next_run);
+        msg +=
+          " — first run " +
+          (rel
+            ? rel + " (" + SB.formatLocal(data.next_run) + ")"
+            : SB.formatLocal(data.next_run));
+      }
+      if (_launcherKind !== submittedKind) {
+        // The user moved on to another kind while the create was in
+        // flight: leave their composer (and anything they staged since)
+        // alone and confirm in passing.
+        showToast(msg);
+        return;
+      }
+      onSuccess(res); // a schedule stages no files of its own; this clears any left over
+      if (_homeCoordComposer) {
+        _homeCoordComposer.clear();
+        // A typed name belongs to the schedule just made, not the next one
+        // (the When builder's state is kept on purpose; a name is not timing).
+        _homeCoordComposer.setOptionValue("name", "");
+      }
+      _homeShowMessage(msg + ". Manage it under Admin › Schedules.", true);
+    })
+    .catch(function () {
+      setBusy(false);
+      errEl.textContent = "Request failed";
+    });
+}
+
+// Ctrl/Cmd+Enter anywhere in the launcher panel submits it — consistent
+// with the modal's keyboard-shortcut convention.  The Composer's own Enter
+// handler already fires submitHomeCoord when focus is in the textarea; this
+// covers focus on the attach / options buttons, the kind toggle, and the
+// When block's fields.
 document.addEventListener("keydown", function (e) {
   if (e.key !== "Enter" || !(e.ctrlKey || e.metaKey)) return;
   if (!_homeCoordComposer) return;
-  const mount = document.getElementById("home-coord-composer-mount");
-  if (!mount || !mount.contains(e.target)) return;
+  const panel = document.getElementById("coord-composer-panel");
+  if (!panel || !panel.contains(e.target)) return;
   e.preventDefault();
   if (!_homeCoordComposer.sendBtn.disabled) submitHomeCoord();
 });
@@ -2068,13 +2359,8 @@ document.addEventListener("keydown", function (e) {
 });
 
 // ---------------------------------------------------------------------------
-// Saved coordinators — closed sessions persisted on disk.  Mirrors the
-// interactive UI's "Saved Workstreams" table (same /shared/cards.js
-// createSavedTable + /shared/cards.css, same response item shape from
-// /v1/api/workstreams/saved), differing only in the CHILDREN column and
-// the body-keyed delete.  Click a row → POST /open then
-// /coordinator/{ws_id}; the lifted detail factory lazily rehydrates from
-// storage on the GET miss.
+// Saved sessions share the standalone table substrate. The server admits
+// each kind independently; activation follows the returned kind and node.
 // ---------------------------------------------------------------------------
 
 // In-flight de-dup for loadSavedCoordinators.  ws_closed events can
@@ -2086,11 +2372,7 @@ let _savedCoordsInFlight = false;
 let _savedCoordsRetry = false;
 
 function loadSavedCoordinators() {
-  // Saved sessions is an operator surface (admin.coordinator) — the unified
-  // list spans BOTH kinds for operators (who already have cluster-wide reach).
-  // Interactive-only users use the launcher, not this list, so the gate stays
-  // admin.coordinator (matching the server gate; a looser gate here would 403).
-  if (!_hasCoordPermission()) return;
+  if (!hasScope("read") || !_coordTable) return;
   // Freeze the list while the user is multi-selecting — re-rendering
   // mid-mode would shuffle the visible page out from under them.  The
   // delete-mode wrapper drains the retry flag on cancel/onClose.
@@ -2103,11 +2385,15 @@ function loadSavedCoordinators() {
     return;
   }
   _savedCoordsInFlight = true;
+  const generation = authGeneration();
   authFetch("/v1/api/workstreams/saved")
     .then(function (r) {
-      return r.ok ? r.json() : { workstreams: [] };
+      if (!r.ok)
+        throw new Error("Could not load saved sessions (" + r.status + ").");
+      return r.json();
     })
     .then(function (data) {
+      if (generation !== authGeneration()) return;
       // Belt-and-braces: if the user entered delete mode while this
       // fetch was already in flight, defer the render — re-rendering
       // mid-selection would shuffle visible cards and reshape selections.
@@ -2116,14 +2402,20 @@ function loadSavedCoordinators() {
         return;
       }
       const saved = data.workstreams || [];
+      _setSavedError("");
       const sec = document.getElementById("saved-coordinators");
       if (sec) sec.style.display = saved.length ? "" : "none";
       _coordTable.setItems(saved);
     })
-    .catch(function () {
-      /* silent — saved list is informational, not load-bearing */
+    .catch(function (error) {
+      if (generation !== authGeneration()) return;
+      _coordTable.setItems([]);
+      _setSavedError(error.message || "Could not load saved sessions.");
+      const sec = document.getElementById("saved-coordinators");
+      if (sec) sec.style.display = "";
     })
     .finally(function () {
+      if (generation !== authGeneration()) return;
       _savedCoordsInFlight = false;
       // If at least one call arrived while we were in flight, fire one
       // catch-up fetch (not N) so the UI reflects the latest state
@@ -2133,6 +2425,38 @@ function loadSavedCoordinators() {
         loadSavedCoordinators();
       }
     });
+}
+
+function _setSavedError(message) {
+  const error = document.getElementById("coord-saved-error");
+  if (error) error.hidden = !message;
+  const text = document.getElementById("coord-saved-error-text");
+  if (text) text.textContent = message;
+  ["saved-coord-cards", "coord-saved-footer"].forEach(function (id) {
+    const element = document.getElementById(id);
+    if (element) element.style.display = message ? "none" : "";
+  });
+}
+
+function _savedAuthChanged() {
+  _savedCoordsInFlight = _savedCoordsRetry = false;
+  _setSavedError("");
+  if (_coordTable) _coordTable.reset();
+  const sec = document.getElementById("saved-coordinators");
+  if (sec) sec.style.display = "none";
+  if (typeof _refreshHomeComposerVisibility === "function") {
+    _refreshHomeComposerVisibility();
+  }
+  loadSavedCoordinators();
+}
+
+function _canActOnSavedSession(session) {
+  return (
+    hasScope("write") &&
+    (session.kind !== "coordinator" ||
+      hasScope("service") ||
+      _hasCoordPermission())
+  );
 }
 
 // Saved Coordinators table — same shared createSavedTable as the server UI
@@ -2179,6 +2503,8 @@ function _initSavedCoordTable() {
     columns: COORD_COLUMNS,
     noun: "session",
     emptyText: "No saved sessions",
+    canActivate: _canActOnSavedSession,
+    canDelete: _canActOnSavedSession,
     activateLabel: function (s) {
       return (
         "Resume " +
@@ -2353,16 +2679,42 @@ window.TS_APP.buildNodeInfo = function (node) {
 // The shell's interactive pane factory calls this on first activate (fresh open,
 // saved-row resume, AND reload-rehydrate all funnel through here).
 //
-// Origin-FIRST: POST /open on the hint node (the live / origin / just-created
-// node) — this REUSES a session already loaded there instead of loading a
-// duplicate copy elsewhere, and keeps node affinity (the pane talks directly to
-// /node/{id} for every verb, so load-node == pane-node).  Only when the hint
-// node is gone (404 = not in the registry / 502 = unreachable) or there is no
-// hint do we re-home onto a live rendezvous node via GET /v1/api/route (the
-// router skips dead nodes; persistence is shared ws_id-keyed Postgres, so any
-// live node is state-safe).  Capacity (429) / permission (403) surface as an
-// error — NOT a silent re-home.  Resolves to {nodeId} on success, else {error}.
+// Try the live/origin hint first to reuse an already loaded session. A missing,
+// unreachable, or wrong-node hint requires a fresh route lookup. The router
+// preserves durable node requirements; flexible sessions retain HRW recovery.
+// Both the router and the executing node enforce the requirement.
 window.TS_APP.resolveInteractiveNode = function (wsId, hintNodeId) {
+  const readFailure = function (r) {
+    return Promise.resolve()
+      .then(function () {
+        return r.json();
+      })
+      .catch(function () {
+        return {};
+      })
+      .then(function (data) {
+        const required = data && data.required_node_id;
+        if (
+          data &&
+          ((r.status === 503 && data.code === "required_node_unavailable") ||
+            (r.status === 409 && data.code === "wrong_execution_node")) &&
+          typeof required === "string" &&
+          /^[A-Za-z0-9_.-]{1,256}$/.test(required)
+        ) {
+          return {
+            status: r.status,
+            code: data.code,
+            requiredNodeId: required,
+            error:
+              "This session requires node '" +
+              required +
+              "'. Retry when it returns, or continue elsewhere from saved history.",
+            canContinue: true,
+          };
+        }
+        return { status: r.status };
+      });
+  };
   const openOn = function (nodeId) {
     return authFetch(
       "/node/" +
@@ -2372,29 +2724,29 @@ window.TS_APP.resolveInteractiveNode = function (wsId, hintNodeId) {
         "/open",
       { method: "POST" },
     ).then(function (r) {
-      return r.ok ? { nodeId: nodeId } : { status: r.status };
+      return r.ok ? { nodeId: nodeId } : readFailure(r);
     });
   };
   // Single error surface: the failure is returned as {error} and the interactive
   // pane writes it into its .pane-status line (the pane is always the active tab
   // when it resolves).  No toast — one source of truth, no wording drift.
-  const failResult = function (status) {
+  const failResult = function (res) {
+    if (res.error) return res;
+    const status = res.status;
     if (status === 429)
       return { error: "Node at capacity — close a session and retry." };
     if (status === 403)
       return { error: "You don’t have permission to open this session." };
-    return { error: "Could not open this session (" + status + ")." };
+    return {
+      error: "Could not open this session (" + status + ").",
+      canContinue: status === 502 || status === 503,
+    };
   };
   const routeFallback = function () {
     return authFetch("/v1/api/route?ws_id=" + encodeURIComponent(wsId))
       .then(function (r) {
         if (!r.ok) {
-          return {
-            error:
-              r.status === 503
-                ? "No nodes available to open this session."
-                : "Could not locate the session node (" + r.status + ").",
-          };
+          return readFailure(r).then(failResult);
         }
         return r.json();
       })
@@ -2404,21 +2756,66 @@ window.TS_APP.resolveInteractiveNode = function (wsId, hintNodeId) {
         if (!route.node_id)
           return { error: "Could not locate the session node." };
         return openOn(route.node_id).then(function (res) {
-          return res.nodeId ? res : failResult(res.status);
+          return res.nodeId ? res : failResult(res);
         });
       });
   };
   const flow = hintNodeId
     ? openOn(hintNodeId).then(function (res) {
         if (res.nodeId) return res;
-        // Origin gone -> rendezvous re-home; capacity/permission surface as-is.
-        if (res.status === 404 || res.status === 502) return routeFallback();
-        return failResult(res.status);
+        if (
+          res.status === 404 ||
+          res.status === 502 ||
+          res.code === "wrong_execution_node"
+        )
+          return routeFallback();
+        return failResult(res);
       })
     : routeFallback();
   return flow.catch(function () {
     return { error: "Failed to open this session." };
   });
+};
+
+window.TS_APP.continueInteractiveElsewhere = function (wsId, requiredNodeId) {
+  const dlg = document.getElementById("continue-session-dialog");
+  if (!dlg || dlg.open) return;
+  const select = document.getElementById("continue-session-node");
+  const error = document.getElementById("continue-session-error");
+  const submit = document.getElementById("continue-session-submit");
+  select.replaceChildren(new Option("Choose a destination node", ""));
+  Object.keys((clusterState && clusterState.nodes) || {})
+    .sort()
+    .forEach(function (nodeId) {
+      const node = clusterState.nodes[nodeId];
+      if (
+        nodeId !== "console" &&
+        nodeId !== requiredNodeId &&
+        node.reachable !== false
+      )
+        select.add(new Option(nodeId, nodeId));
+    });
+  error.textContent =
+    select.options.length === 1
+      ? "No other nodes are available. Retry when a node returns."
+      : "";
+  submit.disabled = select.options.length === 1;
+  submit.onclick = function () {
+    if (dlg.hasAttribute("data-busy")) return;
+    _createInteractive({
+      resume_ws: wsId,
+      node_strategy: "node",
+      node_id: select.value,
+      errEl: error,
+      setBusy: function (busy) {
+        window.TurnstoneHatch.setBusy(dlg, busy);
+      },
+      onSuccess: function () {
+        dlg.close();
+      },
+    });
+  };
+  window.TurnstoneHatch.openDialog(dlg);
 };
 // === MCP consent badge (console L-shell) ====================================
 // Mirror of the node dashboard's pending-consent subsystem (ui/static/app.js
@@ -2584,4 +2981,5 @@ window.TS_APP.boot = function () {
     _refreshHomeComposerVisibility();
     loadSavedCoordinators();
   });
+  onAuthChange(_savedAuthChanged);
 };

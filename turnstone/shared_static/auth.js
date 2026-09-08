@@ -33,6 +33,8 @@ const _authChannel =
 if (_authChannel) {
   _authChannel.onmessage = function (e) {
     if (e.data === "login") {
+      _invalidateAuth();
+      _loggedOut = false;
       hideLogin();
       if (typeof window.onLoginSuccess === "function") window.onLoginSuccess();
       _scheduleRefreshFromWhoami();
@@ -58,28 +60,15 @@ export function noteVersionMismatch() {
 
 export async function authFetch(url, opts) {
   const maxRetries = 2;
+  let epoch = _authEpoch;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (epoch !== _authEpoch) throw new Error("auth changed");
     const r = await fetch(url, opts);
+    if (epoch !== _authEpoch) throw new Error("auth changed");
     if (r.status === 401) {
-      try {
-        const body = await r.clone().json();
-        if (body && body.code === "version_mismatch") {
-          _authUpgradeReload = true;
-          showLogin("upgrade");
-          throw new Error("auth");
-        }
-      } catch (e) {
-        if (e.message === "auth") throw e;
-      }
-      // Reactive refresh — try once before falling through to login.
-      // Covers cases where the proactive refresh timer didn't fire
-      // (tab restored from disk-cache after expiry, system clock jump,
-      // page first-load with a stale cookie).
-      if (attempt === 0 && (await _tryRefresh())) {
-        continue; // retry the original request with the new cookie
-      }
-      showLogin();
-      throw new Error("auth");
+      await _recoverUnauthorized(r, () => epoch === _authEpoch, attempt === 0);
+      epoch = _authEpoch;
+      continue; // retry the original request with the new cookie
     }
     if (r.status === 429 && attempt < maxRetries) {
       const retryAfter = parseInt(r.headers.get("Retry-After") || "1", 10);
@@ -97,6 +86,36 @@ export async function authFetch(url, opts) {
   }
 }
 
+// Both API requests and whoami must recover a rejected cookie. Clearing cached
+// identity first would invalidate the API requests that otherwise open login.
+async function _recoverUnauthorized(r, isCurrent, allowRefresh = true) {
+  if (!isCurrent()) throw new Error("auth changed");
+  try {
+    const body = await r.clone().json();
+    if (!isCurrent()) throw new Error("auth changed");
+    if (body && body.code === "version_mismatch") {
+      _authUpgradeReload = true;
+      showLogin("upgrade");
+      throw new Error("auth");
+    }
+  } catch (e) {
+    if (e.message === "auth" || e.message === "auth changed") throw e;
+  }
+  if (!isCurrent()) throw new Error("auth changed");
+  // Reactive refresh covers expired cookies when the proactive timer missed.
+  const generation = authGeneration();
+  const refreshed = allowRefresh ? await _tryRefresh() : false;
+  if (refreshed === true) return;
+  // A concurrent whoami may supersede refresh for the same identity.
+  // Its newly confirmed authority must survive this older request.
+  if (!isCurrent() || generation !== authGeneration())
+    throw new Error("auth changed");
+  if (refreshed === null)
+    throw new Error("Authentication temporarily unavailable. Try again.");
+  showLogin();
+  throw new Error("auth");
+}
+
 // ---------------------------------------------------------------------------
 // Cookie refresh — proactive timer + reactive on-401 fallback
 // ---------------------------------------------------------------------------
@@ -112,6 +131,7 @@ const _REFRESH_AT_FRACTION = 0.9;
 const _REFRESH_MIN_DELAY_MS = 30 * 1000;
 const _REFRESH_MAX_DELAY_MS = 24 * 60 * 60 * 1000;
 let _refreshTimer = null;
+let _refreshExpiry = 0;
 let _refreshInFlight = null;
 // Logout race guard: a refresh (or whoami) in flight when the user
 // clicks Logout can land AFTER /logout and re-populate state, silently
@@ -122,6 +142,49 @@ let _refreshInFlight = null;
 let _loggedOut = false;
 let _refreshAbort = null;
 let _whoamiAbort = null;
+let _refreshSequence = 0;
+let _whoamiSequence = 0;
+let _authGeneration = 0;
+let _authEpoch = 0;
+const _authSubscribers = new Set();
+
+/** Version of the browser's current identity and effective authority. */
+export function authGeneration() {
+  return _authGeneration;
+}
+
+/** Subscribe to identity, permission, scope, or authentication-loss changes. */
+export function onAuthChange(callback) {
+  _authSubscribers.add(callback);
+}
+
+function _publishAuthChange() {
+  _authGeneration++;
+  _authSubscribers.forEach(function (callback) {
+    try {
+      callback();
+    } catch (error) {
+      console.warn("Auth state listener failed", error);
+    }
+  });
+}
+
+function _invalidateAuth() {
+  _authEpoch++;
+  _loggedOut = true;
+  _cancelRefreshTimer();
+  _refreshExpiry = 0;
+  _refreshSequence++;
+  _whoamiSequence++;
+  [_refreshAbort, _whoamiAbort].forEach(function (ctrl) {
+    if (ctrl) ctrl.abort();
+  });
+  _refreshInFlight = _refreshAbort = _whoamiAbort = null;
+  const generation = authGeneration();
+  _storePermissions(null);
+  if (generation === authGeneration()) _publishAuthChange();
+  if (typeof window.onLogout === "function") window.onLogout();
+}
 
 // Permissions-ready: one-shot promise resolved after the initial whoami
 // completes (success OR failure).  Lets permission-gated UI await the
@@ -144,7 +207,7 @@ if (typeof window !== "undefined") {
   window.permissionsReady = _permissionsReady;
 }
 
-// Generic scope check over the permission list this module itself populates
+// Exact named-permission check over the list this module itself populates
 // (sessionStorage "turnstone_permissions", comma-separated).  Absent means
 // DENIED: the key is also absent for a principal holding zero permissions,
 // so granting on absent would hand a control to exactly the caller who
@@ -154,6 +217,13 @@ if (typeof window !== "undefined") {
 export function hasPermission(scope) {
   const perms = sessionStorage.getItem("turnstone_permissions") || "";
   return perms.split(",").indexOf(scope) !== -1;
+}
+
+/** Effective transport scopes supplied by the server, separate from RBAC names. */
+export function hasScope(scope) {
+  return (sessionStorage.getItem("turnstone_scopes") || "")
+    .split(",")
+    .includes(scope);
 }
 
 // Run cb once the initial whoami has settled: via window.permissionsReady
@@ -176,7 +246,7 @@ export function whenPermissionsReady(cb) {
 
 async function _tryRefresh() {
   // Don't start a refresh if logout already won the race.
-  if (_loggedOut) return false;
+  if (_loggedOut || !_canRefresh()) return false;
   // De-dupe concurrent callers — many parallel authFetch'es hitting
   // 401 at once should still only fire one /refresh request.
   if (_refreshInFlight) {
@@ -188,6 +258,8 @@ async function _tryRefresh() {
   }
   _refreshAbort =
     typeof AbortController !== "undefined" ? new AbortController() : null;
+  const sequence = ++_refreshSequence;
+  const generation = authGeneration();
   _refreshInFlight = (async function () {
     try {
       const r = await fetch("/v1/api/auth/refresh", {
@@ -196,6 +268,11 @@ async function _tryRefresh() {
         credentials: "same-origin",
         signal: _refreshAbort ? _refreshAbort.signal : undefined,
       });
+      if (_loggedOut || generation !== authGeneration()) return false;
+      if (r.status === 503) {
+        _scheduleRefreshRetry();
+        return null; // Unavailable, not an authoritative authentication refusal.
+      }
       if (!r.ok) return false;
       let data = null;
       try {
@@ -208,7 +285,7 @@ async function _tryRefresh() {
       // reschedule a timer, don't broadcast (would re-arm sibling tabs).
       // The new cookie is harmless — logout's clear-cookie response
       // already overwrote it on the way back from this fetch.
-      if (_loggedOut) return false;
+      if (_loggedOut || generation !== authGeneration()) return false;
       // Consume the refresh response inline.  /refresh returns the same
       // permissions + exp shape as /whoami (auth.py:handle_auth_refresh),
       // so we can populate sessionStorage and reschedule the next refresh
@@ -232,13 +309,32 @@ async function _tryRefresh() {
       if (_authChannel) _authChannel.postMessage("refresh");
       return true;
     } catch (_e) {
-      return false;
+      if (_loggedOut || generation !== authGeneration()) return false;
+      _scheduleRefreshRetry();
+      return null;
     } finally {
-      _refreshInFlight = null;
-      _refreshAbort = null;
+      if (sequence === _refreshSequence) {
+        _refreshInFlight = null;
+        _refreshAbort = null;
+      }
     }
   })();
   return await _refreshInFlight;
+}
+
+function _canRefresh() {
+  return sessionStorage.getItem("turnstone_can_refresh") === "true";
+}
+
+function _scheduleRefreshRetry() {
+  const deadline = _refreshExpiry * 1000;
+  if (!_canRefresh() || deadline - Date.now() <= _REFRESH_MIN_DELAY_MS) return;
+  _cancelRefreshTimer();
+  _refreshTimer = setTimeout(function () {
+    _refreshTimer = null;
+    // A suspended tab must not keep retrying beyond the original session's life.
+    if (Date.now() < deadline) _tryRefresh();
+  }, _REFRESH_MIN_DELAY_MS);
 }
 
 function _scheduleRefreshAt(epochSeconds) {
@@ -246,7 +342,13 @@ function _scheduleRefreshAt(epochSeconds) {
     clearTimeout(_refreshTimer);
     _refreshTimer = null;
   }
-  if (typeof epochSeconds !== "number" || !isFinite(epochSeconds)) return;
+  if (
+    !_canRefresh() ||
+    typeof epochSeconds !== "number" ||
+    !isFinite(epochSeconds)
+  )
+    return;
+  _refreshExpiry = epochSeconds;
   const nowMs = Date.now();
   const expMs = epochSeconds * 1000;
   const remaining = expMs - nowMs;
@@ -261,9 +363,8 @@ function _scheduleRefreshAt(epochSeconds) {
 }
 
 function _scheduleRefreshFromWhoami() {
-  // Best-effort — failure here just means no proactive refresh; the
-  // reactive on-401 path still works.  Uses fetch (not authFetch) to
-  // avoid recursion through the on-401 trap.
+  // Network failure just means no proactive refresh. A confirmed 401 uses
+  // the same recovery as authFetch, so startup never depends on response order.
   //
   // Also rehydrates sessionStorage permissions when the cookie outlives
   // the tab session: an existing valid cookie means the user is still
@@ -287,32 +388,39 @@ function _scheduleRefreshFromWhoami() {
   // clobber the newer one's effects (clearing permissions right after a
   // successful login, or rescheduling off a stale exp).  We abort the
   // prior in-flight whoami before starting a new one AND guard the
-  // post-fetch effects with `_whoamiAbort === ctrl` so a late arrival
+  // post-fetch effects with a request sequence so a late arrival
   // from a superseded call is fully neutralised.
   const prior = _whoamiAbort;
   if (prior) {
     try {
       prior.abort();
     } catch (_e) {
-      /* AbortController not available; the equality check below covers it */
+      /* The sequence check below also covers superseded calls. */
     }
   }
   const ctrl =
     typeof AbortController !== "undefined" ? new AbortController() : null;
+  const sequence = ++_whoamiSequence;
+  const generation = authGeneration();
+  const isCurrent = () =>
+    !_loggedOut &&
+    generation === authGeneration() &&
+    sequence === _whoamiSequence;
   _whoamiAbort = ctrl;
   fetch("/v1/api/auth/whoami", {
     credentials: "same-origin",
     signal: ctrl ? ctrl.signal : undefined,
   })
-    .then(function (r) {
-      return r.ok ? r.json() : null;
-    })
-    .then(function (data) {
-      if (_loggedOut) return;
-      // Bail if a newer call has superseded us — its eventual effects
-      // are the authoritative ones; ours would only clobber.
-      if (_whoamiAbort !== ctrl) return;
-      // Treat a non-OK whoami (data === null) as an explicit clear.
+    .then(async function (r) {
+      if (!isCurrent()) return;
+      if (r.status === 401) {
+        await _recoverUnauthorized(r, isCurrent);
+        return; // Refresh owns authority storage, including unchanged identity.
+      }
+      const data = r.ok ? await r.json() : null;
+      // A newer call's effects are authoritative, even if the identity is equal.
+      if (!isCurrent()) return;
+      // Treat another non-OK whoami (data === null) as an explicit clear.
       // _storePermissions(null) removes the key so stale UI gating
       // disappears when the server-side identity is gone (user
       // deleted, role stripped, token revoked between tab close and
@@ -330,7 +438,7 @@ function _scheduleRefreshFromWhoami() {
     })
     .finally(function () {
       // Only clear if still ours — a newer call may have replaced it.
-      if (_whoamiAbort === ctrl) _whoamiAbort = null;
+      if (sequence === _whoamiSequence) _whoamiAbort = null;
       _markPermissionsReady();
     });
 }
@@ -376,6 +484,9 @@ export function initLogin() {
       .catch(function () {
         _onSuccess(); // Proceed even if permissions fetch fails
       });
+  } else if (_loggedOut) {
+    // Authentication can fail before the shell mounts this overlay.
+    showLogin(_authUpgradeReload ? "upgrade" : undefined);
   }
 }
 
@@ -535,6 +646,7 @@ function _showError(msg) {
 }
 
 export function showLogin(reason, oidcError) {
+  _invalidateAuth();
   const overlay = document.getElementById("login-overlay");
   if (!overlay) return;
   overlay.style.display = "flex";
@@ -758,10 +870,30 @@ function _submitSetup() {
 }
 
 function _storePermissions(data) {
+  const before = [
+    "ts.user_id",
+    "turnstone_permissions",
+    "turnstone_scopes",
+    "turnstone_can_refresh",
+  ].map(function (key) {
+    return sessionStorage.getItem(key);
+  });
   if (data && data.permissions) {
     sessionStorage.setItem("turnstone_permissions", data.permissions);
   } else {
     sessionStorage.removeItem("turnstone_permissions");
+  }
+  if (data && data.scopes) {
+    sessionStorage.setItem("turnstone_scopes", data.scopes);
+  } else {
+    sessionStorage.removeItem("turnstone_scopes");
+  }
+  if (data && data.can_refresh === true) {
+    sessionStorage.setItem("turnstone_can_refresh", "true");
+  } else {
+    sessionStorage.removeItem("turnstone_can_refresh");
+    _cancelRefreshTimer();
+    _refreshExpiry = 0;
   }
   // Surface the authenticated identity for the rail footer's user chip.  whoami
   // returns the human `username` (display name) alongside the opaque user_id;
@@ -782,6 +914,16 @@ function _storePermissions(data) {
   } else {
     sessionStorage.removeItem("ts.user_id");
   }
+  const after = [
+    "ts.user_id",
+    "turnstone_permissions",
+    "turnstone_scopes",
+    "turnstone_can_refresh",
+  ].map(function (key) {
+    return sessionStorage.getItem(key);
+  });
+  if (before[0] && before[0] !== after[0]) _authEpoch++;
+  if (JSON.stringify(before) !== JSON.stringify(after)) _publishAuthChange();
 }
 
 function _setBusy(busy, label) {
@@ -820,33 +962,17 @@ function _onSuccess() {
 }
 
 export function logout() {
-  // Set flag + abort in-flight fetches BEFORE the network call so any
-  // concurrent _tryRefresh() / _scheduleRefreshFromWhoami() bails its
-  // post-fetch effects (see _loggedOut handling above).  Without this,
-  // a refresh or whoami already in flight can land after /logout and
-  // re-set the cookie or re-populate sessionStorage permissions.
-  _loggedOut = true;
-  _cancelRefreshTimer();
-  [_refreshAbort, _whoamiAbort].forEach(function (ctrl) {
-    if (!ctrl) return;
-    try {
-      ctrl.abort();
-    } catch (_e) {
-      /* AbortController not available; the _loggedOut flag handles it */
-    }
-  });
+  _invalidateAuth();
+  const generation = authGeneration();
   fetch("/v1/api/auth/logout", { method: "POST" }).then(function () {
-    sessionStorage.removeItem("turnstone_permissions");
+    if (generation !== authGeneration()) return;
     if (_authChannel) _authChannel.postMessage("logout");
-    if (typeof window.onLogout === "function") window.onLogout();
     showLogin();
   });
 }
 
-// Schedule on initial load if already authenticated.  The whoami
-// request silently fails if the cookie is missing or expired, which
-// is the right behaviour — the first authFetch will trigger the
-// login overlay via the existing on-401 path.
+// Rehydrate authority and schedule refresh on initial load. A missing or expired
+// cookie uses the shared recovery path, even if whoami precedes all API responses.
 if (typeof window !== "undefined") {
   _scheduleRefreshFromWhoami();
 }
@@ -862,5 +988,8 @@ Object.assign(window, {
   initLogin,
   noteVersionMismatch,
   hasPermission,
+  hasScope,
+  authGeneration,
+  onAuthChange,
   whenPermissionsReady,
 });

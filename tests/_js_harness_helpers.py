@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import subprocess
+import tempfile
 from typing import TYPE_CHECKING
 
 import pytest
@@ -67,6 +70,10 @@ class FakeElement {
     return child;
   }
   append(...children) { children.forEach((child) => this.appendChild(child)); }
+  replaceChildren(...children) {
+    [...this.children].forEach((child) => child.remove());
+    this.append(...children);
+  }
   remove() {
     if (!this.parentNode) return;
     const i = this.parentNode.children.indexOf(this);
@@ -185,6 +192,24 @@ globalThis.triggerResize = (target) => {
 
 def has_node() -> bool:
     return shutil.which("node") is not None
+
+
+def run_node_source(source: str, *, timeout: int = 15) -> subprocess.CompletedProcess[str]:
+    """Run ``source`` as an ES module under node and return the process.
+
+    The one home for the write-temp-file / run / unlink plumbing the
+    slice-and-run suites share (a sliced console function plus ``throw``
+    checks); skips the test when node is absent.
+    """
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".mjs", delete=False) as f:
+        f.write(source)
+        tmp = f.name
+    try:
+        return subprocess.run(["node", tmp], capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        pytest.skip("node binary not available on PATH")
+    finally:
+        os.unlink(tmp)
 
 
 # Module-level ``pytestmark = node_skip`` in each harness suite — the node

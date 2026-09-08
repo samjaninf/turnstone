@@ -69,6 +69,13 @@ Turnstone gives LLMs tools — shell, files, search, web, planning — and orche
 - **MCP support** — external tool servers with native deferred loading (Anthropic/OpenAI) or BM25 fallback
 - **Team controls when you need them** — optional RBAC, SSO, tool policies, and audit logs, all stored in your own database
 
+The browser's **Default / Compact** control saves your transcript preference in that browser.
+Compact hides reasoning text and folds completed successful tool details. Both views show a
+**Reasoning** indicator with elapsed seconds while the model prepares its answer. The clock starts
+when the browser observes that phase and continues as reasoning tokens arrive; reconnecting to an
+existing phase starts a new clock if its start was not observed. Completed history has no estimated
+reasoning duration.
+
 <p align="center">
   <img src="docs/diagrams/architecture-overview.svg" alt="Turnstone system architecture" width="960"/>
 </p>
@@ -126,6 +133,10 @@ LLM; add model backends from the console UI.
 For production (released images from ghcr.io, real secrets required), use the
 bundled stack: `docker compose -f turnstone/deploy/compose.yaml up`.
 
+For optional SSO, per-user MCP OAuth, or model gateway authentication, the
+installer and both stacks support one [shared authentication config](docs/docker.md#shared-bootstrap-config).
+The default local-login setup needs no additional configuration.
+
 See [QUICKSTART.md](QUICKSTART.md) for the install + troubleshooting walkthrough and [docs/docker.md](docs/docker.md) for Docker configuration.
 
 ### Programmatic (SDK)
@@ -141,7 +152,7 @@ with TurnstoneServer("http://localhost:8080", token="tok_xxx") as client:
 
 ## Tools
 
-Built-in tools for shell, files, search, web, memory, notifications, and autonomous sub-agents — plus external tools via [MCP](https://modelcontextprotocol.io/) with native deferred loading. See [docs/tools.md](docs/tools.md) for the full reference and [docs/mcp-registry.md](docs/mcp-registry.md) for MCP configuration.
+Built-in tools for shell, files, search, web, memory, notifications, and autonomous sub-agents — plus external tools via [MCP](https://modelcontextprotocol.io/) with native deferred loading. See [docs/tools.md](docs/tools.md) for the full reference, [docs/mcp-registry.md](docs/mcp-registry.md) for MCP configuration, and [MCP authentication](docs/mcp-oauth.md) for auth choices and remote Docker/GitHub OAuth setup.
 
 ## Architecture
 
@@ -195,6 +206,7 @@ UML diagrams in [`docs/diagrams/`](docs/diagrams/):
 | Eval harness | [docs/eval.md](docs/eval.md) |
 | Tools reference | [docs/tools.md](docs/tools.md) |
 | MCP integration | [docs/mcp-registry.md](docs/mcp-registry.md) |
+| MCP authentication / OAuth | [docs/mcp-oauth.md](docs/mcp-oauth.md) |
 
 ## Requirements
 

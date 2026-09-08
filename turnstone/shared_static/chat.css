@@ -993,7 +993,9 @@
    cyan tool surface, the yellow operator bubbles, and the amber user turns.
    NOT magenta: that accent is reserved for the MCP surface (.scope-mcp and
    the admin scope chips); blue's other uses are admin-surface only (model
-   status dots, provider chips) and never co-render with transcript cards. */
+   status dots, provider chips) plus the dashboard launcher's Scheduled kind
+   (a scheduler-started session), and never co-render with transcript
+   cards. */
 .msg.compaction-card {
   border-left-color: var(--blue);
   background: var(--panel);
@@ -1036,7 +1038,9 @@
 }
 /* Indeterminate state — a single-batch summarization emits no part-k/N
    progress, so the bar sweeps until the end event settles it. */
-.msg.compaction-card .msg-compaction-bar.indeterminate .msg-compaction-bar-fill {
+.msg.compaction-card
+  .msg-compaction-bar.indeterminate
+  .msg-compaction-bar-fill {
   width: 40%;
   animation: compaction-sweep 1.4s ease-in-out infinite;
 }
@@ -1049,7 +1053,9 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .msg.compaction-card .msg-compaction-bar.indeterminate .msg-compaction-bar-fill {
+  .msg.compaction-card
+    .msg-compaction-bar.indeterminate
+    .msg-compaction-bar-fill {
     animation: none;
     width: 100%;
     opacity: 0.4;
@@ -1209,16 +1215,30 @@
   font-style: italic;
 }
 .reasoning-activity-status {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  clip-path: inset(50%);
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 7px;
+  padding: 6px 14px;
+  color: var(--ink-3);
+  font-size: 11px;
+  font-style: normal;
   white-space: nowrap;
-  border: 0;
+}
+.reasoning-activity-status::after {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--hair-2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: transcript-reasoning-spin 0.8s linear infinite;
+}
+.reasoning-activity-elapsed {
+  font-variant-numeric: tabular-nums;
+}
+.msg.reasoning > .reasoning-activity-status {
+  padding: 0;
 }
 
 /* Viewer-local compact transcript presentation.  Scope beneath the registered
@@ -1249,38 +1269,6 @@
   > .msg-body {
   display: none;
 }
-:root[data-transcript-presentation="compact"]
-  [data-transcript-root]
-  .msg.reasoning[data-reasoning-active="true"]
-  > .reasoning-activity-status {
-  position: static;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  width: auto;
-  height: auto;
-  padding: 0;
-  margin: 0;
-  overflow: visible;
-  clip: auto;
-  clip-path: none;
-  white-space: normal;
-  border: 0;
-  font-size: 11px;
-}
-:root[data-transcript-presentation="compact"]
-  [data-transcript-root]
-  .msg.reasoning[data-reasoning-active="true"]
-  > .reasoning-activity-status::after {
-  content: "";
-  width: 10px;
-  height: 10px;
-  border: 2px solid var(--hair-2);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: transcript-reasoning-spin 0.8s linear infinite;
-}
-
 @keyframes transcript-reasoning-spin {
   to {
     transform: rotate(360deg);
@@ -1288,10 +1276,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  :root[data-transcript-presentation="compact"]
-    [data-transcript-root]
-    .msg.reasoning[data-reasoning-active="true"]
-    > .reasoning-activity-status::after {
+  .reasoning-activity-status::after {
     animation: none;
   }
 }
@@ -1525,10 +1510,10 @@
   border-left: 2px solid var(--green);
 }
 [data-theme="light"] .hljs-addition {
-  background: rgba(4, 120, 87, 0.06);
+  background: color-mix(in srgb, var(--green) 6%, transparent);
 }
 [data-theme="light"] .hljs-deletion {
-  background: rgba(220, 38, 38, 0.06);
+  background: color-mix(in srgb, var(--red) 6%, transparent);
 }
 
 /* KaTeX math wrappers — shared for the same reason as the hljs theme above:
@@ -2079,6 +2064,60 @@
   color: var(--fg-dim);
   white-space: nowrap;
   margin-left: auto;
+}
+/* Pending-approval chip — a sticky, clickable count of the human gates open
+   in THIS pane's transcript.  Parallel task agents make several live at
+   once and the card can sit far off-screen; the click scrolls to the one
+   the keyboard shortcuts act on.  Same tint family and ink as the rail's
+   attention badge (shell.css .rail-badge) — one signal, one look — and it
+   stays at full strength in the disconnected state (the cycle is still
+   live client-side).  Hidden at zero via [hidden]: no display here, so the
+   UA rule keeps winning.
+
+   Geometry: the bar is 22px min-height with 4px vertical padding, a 14px
+   inner box.  12px line box + 2 × 1px border = 14px, so the bar does NOT
+   change height when the chip appears — it is the transcript/composer
+   boundary, and a shift there lands at the very moment the card paints.
+   The 2px focus ring at 1px offset spans y=1..21 inside that 22px.
+
+   Placement: between the tools and turn cells, the bar's only free space
+   (the turn cell carries margin-left: auto), so the chip appears and
+   disappears without moving any other cell.  The price is clip order under
+   a very narrow pane (turn, then this chip, before the ambient cells);
+   the bar is already slicing text mid-glyph below ~360px, and there the
+   card, the rail badge and the announcer still carry the signal. */
+/* .warn-chip is the look — shared with the coordinator's Children-heading
+   pending chip (coord-chrome.css .side-count-pending); each surface adds
+   only its geometry (padding, font size and family, line box). */
+.warn-chip {
+  appearance: none;
+  flex: none;
+  margin: 0;
+  border: 1px solid var(--warn-tint-border);
+  border-radius: var(--r-sm);
+  background: var(--warn-tint);
+  color: var(--warn-text);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+/* Hover steps the fill toward the ink — a darkening in both themes.
+   (--warn-soft is not a hover token: it is lighter than the tint in light
+   and darker in dark, so it would fade the chip into a white bar.) */
+.warn-chip:hover {
+  background: color-mix(in srgb, var(--warn-tint) 82%, var(--warn));
+}
+.warn-chip:focus-visible {
+  outline: 2px solid var(--warn);
+  outline-offset: 1px;
+}
+/* Family and size as longhands, not the font shorthand: the shorthand
+   would also reset the weight .warn-chip sets. */
+.ws-sb-approval {
+  padding: 0 6px;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 12px;
 }
 .ws-status-bar.ws-sb-warn .ws-sb-tokens {
   color: var(--yellow);

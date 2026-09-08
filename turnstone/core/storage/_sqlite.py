@@ -1440,6 +1440,7 @@ class SQLiteBackend(_KeyedAttachmentSaveWrappers):
         project_id: str | None = None,
         persona: str | None = None,
         fork_reservation_token: str = "",
+        required_node_id: str | None = None,
     ) -> bool:
         now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
         # Kind validation at the storage edge — third of three layers
@@ -1454,26 +1455,32 @@ class SQLiteBackend(_KeyedAttachmentSaveWrappers):
         norm_parent = parent_ws_id if parent_ws_id else None
         norm_project = project_id if project_id else None
         norm_persona = persona if persona else None
+        values = {
+            "ws_id": ws_id,
+            "node_id": node_id,
+            "required_node_id": required_node_id,
+            "user_id": user_id,
+            "alias": alias,
+            "title": title,
+            "name": name,
+            "state": state,
+            "skill_id": skill_id,
+            "skill_version": skill_version,
+            "kind": norm_kind,
+            "parent_ws_id": norm_parent,
+            "project_id": norm_project,
+            "persona": norm_persona,
+            "created": now,
+            "updated": now,
+        }
+        # A retained channel route reserves its deleted source's ID. Reusing
+        # that ID would redirect the conversation into another incarnation.
+        source = sa.select(*(sa.literal(value) for value in values.values())).where(
+            ~sa.exists().where(channel_routes.c.ws_id == ws_id)
+        )
         with self._conn() as conn:
             result = conn.execute(
-                sa.insert(workstreams).prefix_with("OR IGNORE"),
-                {
-                    "ws_id": ws_id,
-                    "node_id": node_id,
-                    "user_id": user_id,
-                    "alias": alias,
-                    "title": title,
-                    "name": name,
-                    "state": state,
-                    "skill_id": skill_id,
-                    "skill_version": skill_version,
-                    "kind": norm_kind,
-                    "parent_ws_id": norm_parent,
-                    "project_id": norm_project,
-                    "persona": norm_persona,
-                    "created": now,
-                    "updated": now,
-                },
+                sa.insert(workstreams).prefix_with("OR IGNORE").from_select(list(values), source)
             )
             inserted = result.rowcount == 1
             if inserted:
@@ -2412,22 +2419,46 @@ class SQLiteBackend(_KeyedAttachmentSaveWrappers):
     # -- Channel routing -------------------------------------------------------
 
     def create_channel_route(
-        self, channel_type: str, channel_id: str, ws_id: str, node_id: str = ""
-    ) -> None:
+        self,
+        channel_type: str,
+        channel_id: str,
+        ws_id: str,
+        node_id: str = "",
+        *,
+        channel_user_id: str = "",
+    ) -> bool:
 
         now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
         with self._conn() as conn:
-            conn.execute(
+            result = conn.execute(
                 sa.insert(channel_routes).prefix_with("OR IGNORE"),
                 {
                     "channel_type": channel_type,
                     "channel_id": channel_id,
                     "ws_id": ws_id,
                     "node_id": node_id,
+                    "channel_user_id": channel_user_id,
                     "created": now,
                 },
             )
             conn.commit()
+            return result.rowcount > 0
+
+    def replace_channel_route(
+        self, channel_type: str, channel_id: str, expected_ws_id: str, ws_id: str
+    ) -> bool:
+        with self._conn() as conn:
+            result = conn.execute(
+                sa.update(channel_routes)
+                .where(
+                    (channel_routes.c.channel_type == channel_type)
+                    & (channel_routes.c.channel_id == channel_id)
+                    & (channel_routes.c.ws_id == expected_ws_id)
+                )
+                .values(ws_id=ws_id, node_id="")
+            )
+            conn.commit()
+            return result.rowcount > 0
 
     def get_channel_route(self, channel_type: str, channel_id: str) -> dict[str, str] | None:
 
@@ -2439,6 +2470,7 @@ class SQLiteBackend(_KeyedAttachmentSaveWrappers):
                     channel_routes.c.ws_id,
                     channel_routes.c.node_id,
                     channel_routes.c.created,
+                    channel_routes.c.channel_user_id,
                 ).where(
                     (channel_routes.c.channel_type == channel_type)
                     & (channel_routes.c.channel_id == channel_id)
@@ -2451,6 +2483,7 @@ class SQLiteBackend(_KeyedAttachmentSaveWrappers):
                     "ws_id": row[2],
                     "node_id": row[3],
                     "created": row[4],
+                    "channel_user_id": row[5],
                 }
             return None
 
@@ -2464,6 +2497,7 @@ class SQLiteBackend(_KeyedAttachmentSaveWrappers):
                     channel_routes.c.ws_id,
                     channel_routes.c.node_id,
                     channel_routes.c.created,
+                    channel_routes.c.channel_user_id,
                 ).where(channel_routes.c.ws_id == ws_id)
             ).fetchone()
             if row:
@@ -2473,6 +2507,7 @@ class SQLiteBackend(_KeyedAttachmentSaveWrappers):
                     "ws_id": row[2],
                     "node_id": row[3],
                     "created": row[4],
+                    "channel_user_id": row[5],
                 }
             return None
 
@@ -2486,6 +2521,7 @@ class SQLiteBackend(_KeyedAttachmentSaveWrappers):
                     channel_routes.c.ws_id,
                     channel_routes.c.node_id,
                     channel_routes.c.created,
+                    channel_routes.c.channel_user_id,
                 )
                 .where(channel_routes.c.channel_type == channel_type)
                 .order_by(channel_routes.c.created.desc())
@@ -2497,19 +2533,22 @@ class SQLiteBackend(_KeyedAttachmentSaveWrappers):
                     "ws_id": r[2],
                     "node_id": r[3],
                     "created": r[4],
+                    "channel_user_id": r[5],
                 }
                 for r in rows
             ]
 
-    def delete_channel_route(self, channel_type: str, channel_id: str) -> bool:
-
+    def delete_channel_route(
+        self, channel_type: str, channel_id: str, *, expected_ws_id: str | None = None
+    ) -> bool:
+        statement = sa.delete(channel_routes).where(
+            (channel_routes.c.channel_type == channel_type)
+            & (channel_routes.c.channel_id == channel_id)
+        )
+        if expected_ws_id is not None:
+            statement = statement.where(channel_routes.c.ws_id == expected_ws_id)
         with self._conn() as conn:
-            result = conn.execute(
-                sa.delete(channel_routes).where(
-                    (channel_routes.c.channel_type == channel_type)
-                    & (channel_routes.c.channel_id == channel_id)
-                )
-            )
+            result = conn.execute(statement)
             conn.commit()
             return result.rowcount > 0
 
@@ -2534,6 +2573,7 @@ class SQLiteBackend(_KeyedAttachmentSaveWrappers):
         notify_targets: str = "[]",
         persona: str = "",
         project_id: str = "",
+        timezone: str = "UTC",
     ) -> None:
 
         now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
@@ -2547,6 +2587,7 @@ class SQLiteBackend(_KeyedAttachmentSaveWrappers):
                     "schedule_type": schedule_type,
                     "cron_expr": cron_expr,
                     "at_time": at_time,
+                    "timezone": timezone,
                     "target_mode": target_mode,
                     "model": model,
                     "initial_message": initial_message,
@@ -2590,6 +2631,7 @@ class SQLiteBackend(_KeyedAttachmentSaveWrappers):
             "schedule_type",
             "cron_expr",
             "at_time",
+            "timezone",
             "target_mode",
             "model",
             "initial_message",
@@ -4501,6 +4543,7 @@ class SQLiteBackend(_KeyedAttachmentSaveWrappers):
                     workstreams.c.updated,
                     workstreams.c.project_id,
                     workstreams.c.persona,
+                    workstreams.c.required_node_id,
                 ).where(workstreams.c.ws_id.in_(clean))
             ).fetchall()
         for r in rows:
@@ -4520,6 +4563,7 @@ class SQLiteBackend(_KeyedAttachmentSaveWrappers):
                 "updated": r[12],
                 "project_id": r[13],
                 "persona": r[14],
+                "required_node_id": r[15],
             }
             out[r[0]] = item
         return out

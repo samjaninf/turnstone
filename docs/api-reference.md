@@ -79,7 +79,7 @@ JWTs are the recommended credential for browser sessions. API tokens are suitabl
 
 ### `POST /v1/api/auth/login`
 
-Authenticate with credentials and receive a JWT. Accepts two credential formats:
+Authenticate with a password or raw stored API token and receive a JWT. JWT input is refused.
 
 **Username + password:**
 
@@ -100,6 +100,7 @@ Authenticate with credentials and receive a JWT. Accepts two credential formats:
   "status": "ok",
   "role": "full",
   "scopes": "approve,read,write",
+  "can_refresh": true,
   "jwt": "eyJhbGciOiJIUzI1NiIs...",
   "user_id": "u_abc123"
 }
@@ -113,6 +114,29 @@ The response also sets a surface-scoped HttpOnly cookie containing the JWT
 ```json
 {"error": "Invalid credentials"}
 ```
+
+Password login requires at least one effective role permission. An empty set returns 403;
+permission-store failure returns 503 without minting a JWT. Raw API tokens retain their explicit
+scopes and return `can_refresh: false`.
+
+---
+
+### `POST /v1/api/auth/refresh`
+
+Renew a currently valid, non-service password/OIDC session using current role permissions. The
+success response includes the login fields, `can_refresh: true`, and `exp` in epoch seconds, and
+sets a fresh session cookie. An empty permission set or an ineligible credential source returns
+403. Permission-store failure returns 503 without replacing or clearing the existing cookie.
+
+API-derived JWTs have a fixed lifetime and cannot renew here; exchange a still-valid raw API token
+through login instead. Proxy, coordinator, service, and other JWT sources cannot use this endpoint.
+Ordinary use of existing JWTs continues until their original expiry.
+
+### `GET /v1/api/auth/whoami`
+
+Return the authenticated identity, named `permissions`, effective `scopes`, and `can_refresh`.
+Renewal eligibility uses the same credential source/scope rule as the refresh endpoint. Cookie
+sessions also include their `exp` when available.
 
 ---
 
@@ -921,6 +945,10 @@ active, and `conflict` requires operator intervention.
 Returns a list of saved workstreams from the database, ordered by most recently
 updated.
 
+Requires `read` scope and applies creator/project visibility. On a node, this lists interactive
+workstreams. On the console, it includes interactive workstreams and also coordinator rows when the
+caller has `admin.coordinator`. A failed storage query returns 503 rather than an empty list.
+
 **Response:**
 
 ```json
@@ -1332,6 +1360,8 @@ An absent or malformed JSON body returns `400`.
 | `auto_approve_tools` | string/array | `""` | Tool names to auto-approve even when `auto_approve` is false; accepts comma-separated text or an array |
 | `user_id`         | string        | `""`  | Owner override honored only for a trusted `console` service identity carrying the `service` scope; ordinary callers remain bound to their authenticated identity |
 | `resume_ws`       | string        | `""`    | Source workstream ID or alias to fork atomically into this new ID |
+| `resume_ws_exact` | bool          | false   | Require `resume_ws` to match an exact source ID; never resolve an alias or prefix |
+| `required_node_id` | string/null | none | Require execution on this node. Omission inherits the fork source's requirement; a fresh direct create without it stays flexible. |
 | `skill`           | string        | `""`    | Skill name. Applies its system prompt and session configuration. Returns 400 if missing/disabled; ignored for a fork because the source configuration is cloned. |
 | `persona`         | string        | `""`    | Persona slug; empty selects the kind's default. A fork keeps the source persona. |
 | `judge_model`     | string        | `""`    | Optional judge model alias                                     |
@@ -1341,6 +1371,10 @@ An absent or malformed JSON body returns `400`.
 | `notify_targets`  | string/array  | `[]`    | Completion-notification targets                                |
 | `client_type`     | string        | `web`   | Client surface label (`web`, `cli`, `chat`, or `scheduled`)    |
 | `parent_ws_id`    | string/null   | none    | Owning coordinator ID for a coordinator-spawned child          |
+
+A deleted workstream ID remains reserved while a channel route references it.
+Creating a new workstream with that ID returns `409`; channel recovery forks or
+starts a conversation under a new ID before updating the association.
 
 > **Skill behavior:** When `skill` is specified, the skill's content is injected as a system message and its session config fields (model, temperature, auto-approve, token budget, etc.) override system defaults for the new workstream.
 
@@ -1352,6 +1386,19 @@ the source's checkpoint-bounded conversation, saved session configuration,
 persona, effective project, and attachment references. The source remains
 unchanged. Use `POST .../{ws_id}/open` when you want to rehydrate the original
 ID instead.
+
+An explicit `required_node_id` applies to the new destination and can differ
+from the source requirement. Omission (including `null`) inherits it. A
+same-ID reopen never changes the requirement. The receiving node returns
+`409` with `code: "wrong_execution_node"` and `required_node_id` before
+constructing executable state if it is not the required node. Node IDs accept
+1–256 letters, digits, dots, underscores, and hyphens; empty requirements are
+invalid. Requirements survive restart, soft close, idle timeout, and eviction.
+
+Set `resume_ws_exact: true` when recovering a stored canonical ID. A missing
+exact source returns `404` even if another workstream has that ID as its alias.
+The console preserves this requirement after resolving an ordinary alias, so
+the node cannot substitute another source if the original disappears in transit.
 
 The clone transaction rechecks source visibility, private-project membership
 and attachability, persona/project construction context, destination ownership
@@ -1577,6 +1624,10 @@ masked as `404`.
 ### `POST /v1/api/workstreams/{ws_id}/delete`
 
 Permanently delete a saved workstream and all its messages from storage.
+
+Requires `write` scope and project access. Deleting a coordinator also requires `admin.coordinator`,
+including through the node endpoint or a console routing proxy. Authorization and deletion use the
+same persisted incarnation snapshot.
 
 **Path parameters:**
 
@@ -2808,8 +2859,8 @@ turnstone_tool_calls_total{tool="read_file"} 3
 ## Console Routing Proxy Endpoints
 
 These endpoints are served by the console (`turnstone-console`) and proxy
-requests to the correct server node via rendezvous (HRW) hashing over the
-live service registry. In multi-node deployments, clients (SDK, channel
+requests to the required execution node, or use placement overrides and
+rendezvous (HRW) hashing for flexible workstreams. In multi-node deployments, clients (SDK, channel
 gateway) talk to the console instead of individual server nodes.
 
 ### `POST /v1/api/route/workstreams/new`
@@ -2819,24 +2870,27 @@ the ordinary create fields plus `target_node`:
 
 | Field | Routing behavior |
 |-------|------------------|
-| `ws_id` | Optional 32-hex destination. When present, it is preserved and used as the rendezvous key, including on a fork. A 503 never replaces a caller-selected ID. |
-| `resume_ws` | Optional source ID or saved alias for an atomic fork. The console resolves aliases to the canonical source ID before routing and forwards that canonical value. When no destination `ws_id` is supplied, the source is the placement key. |
-| `target_node` | Optional node ID hint. When neither `ws_id` nor `resume_ws` selects placement, the console generates a destination whose rendezvous owner is this live node. |
+| `ws_id` | Optional 32-hex destination. It is preserved; without an explicit or inherited requirement it is the rendezvous key. A 503 never replaces a caller-selected ID. |
+| `resume_ws` | Optional source ID or saved alias for an atomic fork. The console authorizes and canonicalizes the source before routing. Its node requirement is inherited unless explicitly replaced on the new ID. For flexible forks without a destination ID, the source is the placement key. |
+| `resume_ws_exact` | Optional boolean, default false. Requires an exact source ID in `resume_ws`; disables alias and prefix resolution. |
+| `target_node` | Optional required execution node, including when `ws_id` or `resume_ws` is supplied. |
+| `required_node_id` | Same durable requirement as direct create. Must match `target_node` when both are supplied. |
 
 Without any placement field, the console generates a destination ID and routes
 it by rendezvous. Multipart callers must pre-allocate the destination and put
 the **same** 32-hex value in both `?ws_id=<32-hex>` and the multipart
-`meta.ws_id` field. The query value selects the target node; the console
+`meta.ws_id` field. An explicit requirement takes precedence over hashing; the console
 buffers the body, parses only `meta` to require the same destination ID, then
 forwards the original bytes and boundary unchanged. The node uses `meta.ws_id`
-as the destination identity.
+as the destination identity. Metadata-only multipart forks use the common JSON
+fork path after parsing, including canonicalization and inherited requirements.
+Uploads cannot be combined with a fork; fork first, then upload.
 
 The response extends the node create response with three required fields:
 `node_url`, authoritative `node_id`, and `routing_strategy`.
-`routing_strategy` is `rendezvous` for generated, explicit JSON, and multipart
-destination IDs; `target_node` when the console generated an ID for a requested
-node; or `resume` only when an atomic fork was placed by its canonical source
-ID. The node-returned destination `ws_id` is authoritative for the response,
+`routing_strategy` is `target_node` for an explicit requirement, `resume` for
+inherited affinity or source placement, and `rendezvous` for destination-ID
+placement. The node-returned destination `ws_id` is authoritative for the response,
 storage binding lookup, and audit record; the fork source is never reported as
 the created destination.
 
@@ -2847,9 +2901,16 @@ returns `200` without an object containing a valid destination `ws_id`, the
 console returns a bounded `502` instead of exposing or trusting the malformed
 payload.
 
+A required node missing from live membership returns `503` with
+`code: "required_node_unavailable"` and `required_node_id`. An unreachable
+registered node can return an upstream `502`. Neither condition permits a
+fallback to another node. Ordinary route resolution reads the durable
+requirement before cached placement, including after the node disappears.
+Private-project requirements follow the same visibility rules as history.
+
 ### `GET /v1/api/route/workstreams/{ws_id}/live`
 
-Probe the rendezvous-selected owner without opening or rehydrating the
+Probe the routed node without opening or rehydrating the
 workstream. The console asks that node's manager-authoritative active list and
 returns only:
 
@@ -2860,6 +2921,8 @@ returns only:
 Missing, unloaded, still-`creating`, and caller-invisible workstreams all
 produce `live: false`. Routing, upstream, and authorization uncertainty returns
 an error instead of a false miss, so callers can preserve an existing route.
+This includes an unavailable required node: channel recovery retains its
+saved association and retries when that node returns.
 
 ### `POST /v1/api/route/workstreams/{ws_id}/send`
 

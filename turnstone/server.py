@@ -2547,11 +2547,29 @@ async def _interactive_create_validate_request(
       canonicalized before the workstream reservation is created.
     """
     requested_ws_id = body.get("ws_id", "") or ""
+    from turnstone.core.node_affinity import (
+        NodeAffinityError,
+        requested_node_requirement,
+        require_execution_node,
+    )
+
+    try:
+        body["required_node_id"] = requested_node_requirement(
+            body.get("required_node_id"), body.get("target_node")
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    body.pop("_resume_required_node_id", None)
     if not isinstance(requested_ws_id, str):
         requested_ws_id = ""
     if requested_ws_id and not _VALID_WS_ID.match(requested_ws_id):
         return JSONResponse({"error": "invalid ws_id format"}, status_code=400)
     resume_ws_id = body.get("resume_ws", "") or ""
+    resume_ws_exact = body.get("resume_ws_exact", False)
+    if not isinstance(resume_ws_exact, bool):
+        return JSONResponse({"error": "resume_ws_exact must be a boolean"}, status_code=400)
+    if resume_ws_exact and (not isinstance(resume_ws_id, str) or not resume_ws_id):
+        return JSONResponse({"error": "resume_ws_exact requires resume_ws"}, status_code=400)
     if uploaded_files and resume_ws_id:
         return JSONResponse(
             {"error": "attachments cannot be combined with resume_ws"},
@@ -2629,15 +2647,16 @@ async def _interactive_create_validate_request(
         # through alias-first resolution: an unrelated row may legally carry
         # that 32-hex string as its alias, and a routing proxy has already
         # canonicalized saved aliases before forwarding the request.  Retain
-        # support for 32-hex aliases only when no exact row exists.
+        # support for 32-hex aliases only when no exact row exists and the
+        # caller has not required an exact identity (as channel recovery does).
         _exact_source = (
-            _rstorage.get_workstream(resume_ws_id) if _VALID_WS_ID.fullmatch(resume_ws_id) else None
+            _rstorage.get_workstream(resume_ws_id)
+            if resume_ws_exact or _VALID_WS_ID.fullmatch(resume_ws_id)
+            else None
         )
-        _canonical = (
-            resume_ws_id
-            if _exact_source is not None
-            else _rstorage.resolve_workstream(resume_ws_id)
-        )
+        _canonical = resume_ws_id if _exact_source is not None else None
+        if _canonical is None and not resume_ws_exact:
+            _canonical = _rstorage.resolve_workstream(resume_ws_id)
         _src_row = (
             _rstorage.ensure_workstream_incarnation_snapshot(_canonical) if _canonical else None
         )
@@ -2666,6 +2685,9 @@ async def _interactive_create_validate_request(
         # incarnation inside its transaction, so delete/recreate under the same
         # canonical id cannot inherit the earlier authorization decision.
         body["_resume_incarnation_token"] = str(_src_row.get("fork_reservation_token") or "")
+        body["_resume_required_node_id"] = _src_row.get("required_node_id")
+        if body["required_node_id"] is None:
+            body["required_node_id"] = _src_row.get("required_node_id")
         body["project_id"] = source_project
         resume_inherited_pid = bool(source_project)
     # Project attach gate (explicit or parent-inherited): a project requires
@@ -2712,6 +2734,10 @@ async def _interactive_create_validate_request(
     if tools_err:
         return JSONResponse({"error": tools_err}, status_code=400)
     body["auto_approve_tools"] = auto_approve_tools
+    try:
+        require_execution_node(body["required_node_id"], getattr(request.app.state, "node_id", ""))
+    except NodeAffinityError as exc:
+        return JSONResponse(exc.as_dict(), status_code=exc.status_code)
     return None
 
 
@@ -2756,6 +2782,7 @@ def _interactive_create_build_kwargs(
         "judge_model": body.get("judge_model", "") or None,
         "parent_ws_id": body.get("parent_ws_id") or None,
         "project_id": body.get("project_id") or None,
+        "required_node_id": body.get("required_node_id"),
     }
 
 
@@ -2791,6 +2818,7 @@ async def _interactive_create_pre_commit(
             source_ws_id,
             principal_id=uid,
             source_reservation_token=source_reservation_token,
+            source_required_node_id=body.get("_resume_required_node_id"),
             trusted_internal=False,
         )
         message_count = len(snapshot.turns)
@@ -3229,6 +3257,7 @@ def _audit_workstream_created(
 async def delete_workstream_endpoint(request: Request) -> JSONResponse:
     """POST /v1/api/workstreams/{ws_id}/delete — permanently delete a saved workstream."""
     from turnstone.core.audit import record_audit
+    from turnstone.core.auth import require_permission
     from turnstone.core.log import get_logger
     from turnstone.core.storage._registry import get_storage
 
@@ -3254,6 +3283,14 @@ async def delete_workstream_endpoint(request: Request) -> JSONResponse:
     owner_uid, err = _require_ws_access(request, ws_id, resolved_row=row)
     if err:
         return err
+    # Authorize kind from the same snapshot that fences the deletion.
+    # Both saved tables route here, including coordinator deletions.
+    if row.get("kind") == WorkstreamKind.COORDINATOR:
+        err = require_permission(request, "admin.coordinator")
+        if err is not None:
+            return err
+    elif row.get("kind") != WorkstreamKind.INTERACTIVE:
+        return JSONResponse({"error": "Unsupported workstream kind"}, status_code=403)
     kind: str = ""
     parent_ws_id: str | None = None
     name: str = ""
@@ -6541,6 +6578,7 @@ def main() -> None:
     # on demand via POST /v1/api/workstreams.
     if args.resume:
         from turnstone.core.memory import resolve_workstream
+        from turnstone.core.node_affinity import NodeAffinityError
 
         target_id = resolve_workstream(args.resume)
         if not target_id:
@@ -6563,9 +6601,19 @@ def main() -> None:
             raise TypeError(f"Expected WebUI, got {type(ws.ui).__name__}")
         if args.skip_permissions or config_store.get("tools.skip_permissions"):
             ws.ui.auto_approve = True
-        assert ws.session is not None
-        if not ws.session.resume(target_id):
+        if ws.session is None:
+            manager.close(ws.id)
+            log.error("No session available for resume: %s", target_id)
+            sys.exit(1)
+        try:
+            resumed = ws.session.resume(target_id)
+        except NodeAffinityError as exc:
+            manager.close(ws.id)
+            log.error("Cannot resume %s: %s", target_id, exc)
+            sys.exit(1)
+        if not resumed:
             log.error("Workstream '%s' has no messages.", args.resume)
+            manager.close(ws.id)
             sys.exit(1)
         # AFTER the successful resume (mirroring the restore fn's order),
         # so the registration keys on the adopted ``target_id`` — the id

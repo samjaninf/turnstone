@@ -170,6 +170,8 @@ class AsyncTurnstoneConsole(_BaseClient):
         persona: str = "",
         project_id: str = "",
         resume_ws: str = "",
+        resume_ws_exact: bool = False,
+        required_node_id: str | None = None,
         judge_model: str = "",
     ) -> ConsoleCreateWsResponse:
         body: dict[str, Any] = {}
@@ -189,6 +191,10 @@ class AsyncTurnstoneConsole(_BaseClient):
             body["project_id"] = project_id
         if resume_ws:
             body["resume_ws"] = resume_ws
+        if resume_ws_exact:
+            body["resume_ws_exact"] = True
+        if required_node_id is not None:
+            body["required_node_id"] = required_node_id
         if judge_model:
             body["judge_model"] = judge_model
         return await self._request(
@@ -220,6 +226,8 @@ class AsyncTurnstoneConsole(_BaseClient):
         persona: str = "",
         project_id: str = "",
         resume_ws: str = "",
+        resume_ws_exact: bool = False,
+        required_node_id: str | None = None,
         judge_model: str = "",
         target_node: str = "",
         user_id: str = "",
@@ -229,6 +237,9 @@ class AsyncTurnstoneConsole(_BaseClient):
         attachments: list[AttachmentUpload] | None = None,
     ) -> RouteCreateResponse:
         """Create a workstream via the console's routing proxy.
+
+        *resume_ws_exact* requires the exact source ID, preventing alias or
+        prefix substitution when recovering a persisted association.
 
         Posts to /v1/api/route/workstreams/new.  When *attachments* is
         non-empty, the request is sent as multipart and the console
@@ -255,6 +266,10 @@ class AsyncTurnstoneConsole(_BaseClient):
             body["project_id"] = project_id
         if resume_ws:
             body["resume_ws"] = resume_ws
+        if resume_ws_exact:
+            body["resume_ws_exact"] = True
+        if required_node_id is not None:
+            body["required_node_id"] = required_node_id
         if judge_model:
             body["judge_model"] = judge_model
         if target_node:
@@ -267,15 +282,6 @@ class AsyncTurnstoneConsole(_BaseClient):
             body["notify_targets"] = notify_targets
 
         if attachments:
-            # The console's multipart route_create routes by `?ws_id=` only —
-            # it does not parse the body to honor `target_node`.  Refuse the
-            # combination at the SDK boundary so callers don't silently get
-            # routed to the wrong node.
-            if target_node:
-                raise ValueError(
-                    "target_node is not supported with attachments; "
-                    "use ws_id (caller-generated to hash to the desired node) instead"
-                )
             if not ws_id:
                 ws_id = secrets.token_hex(16)
             body["ws_id"] = ws_id
@@ -580,6 +586,7 @@ class AsyncTurnstoneConsole(_BaseClient):
         description: str = "",
         cron_expr: str = "",
         at_time: str = "",
+        timezone: str = "",
         target_mode: str = "auto",
         model: str = "",
         auto_approve: bool = False,
@@ -602,6 +609,8 @@ class AsyncTurnstoneConsole(_BaseClient):
             body["cron_expr"] = cron_expr
         if at_time:
             body["at_time"] = at_time
+        if timezone:
+            body["timezone"] = timezone
         if model:
             body["model"] = model
         if auto_approve_tools:
@@ -628,6 +637,7 @@ class AsyncTurnstoneConsole(_BaseClient):
         schedule_type: Any = _UNSET,
         cron_expr: Any = _UNSET,
         at_time: Any = _UNSET,
+        timezone: Any = _UNSET,
         target_mode: Any = _UNSET,
         model: Any = _UNSET,
         initial_message: Any = _UNSET,
@@ -644,6 +654,7 @@ class AsyncTurnstoneConsole(_BaseClient):
             ("schedule_type", schedule_type),
             ("cron_expr", cron_expr),
             ("at_time", at_time),
+            ("timezone", timezone),
             ("target_mode", target_mode),
             ("model", model),
             ("initial_message", initial_message),
@@ -1297,6 +1308,8 @@ class TurnstoneConsole:
         persona: str = "",
         project_id: str = "",
         resume_ws: str = "",
+        resume_ws_exact: bool = False,
+        required_node_id: str | None = None,
         judge_model: str = "",
     ) -> ConsoleCreateWsResponse:
         return self._runner.run(
@@ -1309,6 +1322,8 @@ class TurnstoneConsole:
                 persona=persona,
                 project_id=project_id,
                 resume_ws=resume_ws,
+                resume_ws_exact=resume_ws_exact,
+                required_node_id=required_node_id,
                 judge_model=judge_model,
             )
         )
@@ -1332,6 +1347,8 @@ class TurnstoneConsole:
         persona: str = "",
         project_id: str = "",
         resume_ws: str = "",
+        resume_ws_exact: bool = False,
+        required_node_id: str | None = None,
         judge_model: str = "",
         target_node: str = "",
         user_id: str = "",
@@ -1351,6 +1368,8 @@ class TurnstoneConsole:
                 persona=persona,
                 project_id=project_id,
                 resume_ws=resume_ws,
+                resume_ws_exact=resume_ws_exact,
+                required_node_id=required_node_id,
                 judge_model=judge_model,
                 target_node=target_node,
                 user_id=user_id,
@@ -1511,6 +1530,7 @@ class TurnstoneConsole:
         description: str = "",
         cron_expr: str = "",
         at_time: str = "",
+        timezone: str = "",
         target_mode: str = "auto",
         model: str = "",
         auto_approve: bool = False,
@@ -1525,6 +1545,7 @@ class TurnstoneConsole:
                 description=description,
                 cron_expr=cron_expr,
                 at_time=at_time,
+                timezone=timezone,
                 target_mode=target_mode,
                 model=model,
                 auto_approve=auto_approve,
@@ -1545,6 +1566,7 @@ class TurnstoneConsole:
         schedule_type: Any = _UNSET,
         cron_expr: Any = _UNSET,
         at_time: Any = _UNSET,
+        timezone: Any = _UNSET,
         target_mode: Any = _UNSET,
         model: Any = _UNSET,
         initial_message: Any = _UNSET,
@@ -1560,6 +1582,7 @@ class TurnstoneConsole:
                 schedule_type=schedule_type,
                 cron_expr=cron_expr,
                 at_time=at_time,
+                timezone=timezone,
                 target_mode=target_mode,
                 model=model,
                 initial_message=initial_message,

@@ -110,6 +110,8 @@ class AsyncTurnstoneServer(_BaseClient):
         judge_model: str = "",
         auto_approve: bool = False,
         resume_ws: str = "",
+        resume_ws_exact: bool = False,
+        required_node_id: str | None = None,
         skill: str = "",
         persona: str = "",
         initial_message: str = "",
@@ -122,6 +124,9 @@ class AsyncTurnstoneServer(_BaseClient):
         attachments: list[AttachmentUpload] | None = None,
     ) -> CreateWorkstreamResponse:
         """Create a new workstream.
+
+        *resume_ws_exact* requires the exact source ID, preventing alias or
+        prefix substitution when recovering a persisted association.
 
         When *attachments* is non-empty the request is sent as
         ``multipart/form-data`` with the metadata in a ``meta`` JSON
@@ -148,6 +153,10 @@ class AsyncTurnstoneServer(_BaseClient):
             body["auto_approve"] = True
         if resume_ws:
             body["resume_ws"] = resume_ws
+        if resume_ws_exact:
+            body["resume_ws_exact"] = True
+        if required_node_id is not None:
+            body["required_node_id"] = required_node_id
         if skill:
             body["skill"] = skill
         if persona:
@@ -711,6 +720,8 @@ class TurnstoneServer:
         judge_model: str = "",
         auto_approve: bool = False,
         resume_ws: str = "",
+        resume_ws_exact: bool = False,
+        required_node_id: str | None = None,
         skill: str = "",
         persona: str = "",
         initial_message: str = "",
@@ -729,6 +740,8 @@ class TurnstoneServer:
                 judge_model=judge_model,
                 auto_approve=auto_approve,
                 resume_ws=resume_ws,
+                resume_ws_exact=resume_ws_exact,
+                required_node_id=required_node_id,
                 skill=skill,
                 persona=persona,
                 initial_message=initial_message,

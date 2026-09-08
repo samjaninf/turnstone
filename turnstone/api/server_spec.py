@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 from turnstone.api.schemas import (
     AuthLoginRequest,
     AuthLoginResponse,
+    AuthRefreshResponse,
     AuthSetupRequest,
     AuthSetupResponse,
     AuthStatusResponse,
@@ -286,14 +287,15 @@ SERVER_ENDPOINTS: list[EndpointSpec] = [
         "Get workstream detail (rehydrates lazily on miss)",
         description=(
             "Returns the persisted workstream's display fields. If the "
-            "session isn't currently in memory the manager rehydrates it "
+            "session isn't currently in memory, write scope is additionally "
+            "required before the manager rehydrates it "
             "before responding; ``500`` on rehydrate failure carries a "
             "correlation id matching the server log line. Lifted from "
             "the coord-only surface in the Stage 2 history/detail verb "
             "lift — interactive previously had no detail endpoint."
         ),
         response_model=WorkstreamDetailResponse,
-        error_codes=[400, 404, 500, 503],
+        error_codes=[400, 403, 404, 500, 503],
         tags=["Workstreams"],
     ),
     EndpointSpec(
@@ -412,7 +414,9 @@ SERVER_ENDPOINTS: list[EndpointSpec] = [
         "/v1/api/workstreams/saved",
         "GET",
         "List saved workstreams",
+        description="Lists interactive history visible through creator/project access; requires read scope.",
         response_model=ListSavedWorkstreamsResponse,
+        error_codes=[503],
         tags=["Workstreams"],
     ),
     # --- Skills ---
@@ -443,10 +447,10 @@ SERVER_ENDPOINTS: list[EndpointSpec] = [
     EndpointSpec(
         "/v1/api/auth/login",
         "POST",
-        "Authenticate with a token",
+        "Authenticate with a password or raw stored API token",
         request_model=AuthLoginRequest,
         response_model=AuthLoginResponse,
-        error_codes=[401],
+        error_codes=[400, 401, 403, 429, 503],
         tags=["Auth"],
     ),
     EndpointSpec(
@@ -485,6 +489,14 @@ SERVER_ENDPOINTS: list[EndpointSpec] = [
         "GET",
         "OIDC callback — validates code, provisions user, sets JWT cookie, redirects to app",
         response_code=302,
+        tags=["Auth"],
+    ),
+    EndpointSpec(
+        "/v1/api/auth/refresh",
+        "POST",
+        "Renew a password/OIDC session from current role permissions",
+        response_model=AuthRefreshResponse,
+        error_codes=[401, 403, 503],
         tags=["Auth"],
     ),
     EndpointSpec(
@@ -602,6 +614,7 @@ _ALL_MODELS: list[type[BaseModel]] = [
     StatusResponse,
     AuthLoginRequest,
     AuthLoginResponse,
+    AuthRefreshResponse,
     AuthSetupRequest,
     AuthSetupResponse,
     AuthStatusResponse,

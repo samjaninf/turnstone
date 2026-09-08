@@ -29,6 +29,10 @@
   --accent: #e5a042;
   --accent-dim: rgba(229, 160, 66, 0.15);
   --accent-glow: rgba(229, 160, 66, 0.08);
+  /* Far stop of the rail's brand-mark gradient: a step below the accent
+     here, a step above it in the light theme, so the mark keeps the same
+     shading depth on both. */
+  --brand-mark-end: #b9762a;
 
   /* Semantic indicators */
   --green: #34d399;
@@ -113,6 +117,11 @@
   --warn-soft: oklch(0.29 0.07 80);
   --warn-tint: oklch(0.22 0.05 80);
   --warn-tint-border: oklch(0.58 0.15 80);
+  /* Ink for text ON --warn-tint (the rail badge, the status-bar approval
+     chip).  Equals --warn here (6.4:1 on the dark tint) but is a separate
+     token, written out, so a retune of --warn can't drag chip ink with it;
+     in light, --warn itself is only 3.3:1 on the pale tint. */
+  --warn-text: oklch(0.7 0.13 80);
   --err: oklch(0.68 0.17 25);
   --err-soft: oklch(0.29 0.07 25);
   --err-fill: oklch(0.56 0.17 25); /* darker filled red for .risk.crit */
@@ -134,27 +143,40 @@
   --fg: #1e293b;
   --fg-dim: #576275;
   --fg-bright: #0f172a;
-  --accent: #8c5e1b;
-  --accent-dim: rgba(140, 94, 27, 0.1);
-  --accent-glow: rgba(140, 94, 27, 0.05);
-  --green: #047857;
-  --red: #b91c1c;
-  --yellow: #b45309;
-  --cyan: #0e7490;
-  --magenta: #7c3aed;
-  --blue: #0369a1;
-  --discord: #4f46e5; /* darker indigo on white surface — passes WCAG AA */
-  --slack: #be185d; /* darker rose */
+  /* The indicator hues run one step darker than the first light cut: text
+     in a hue over a 15% tint of the same hue — the launcher's active kind
+     at 12px, the skill shelf's origin badge at 9px — has to clear the
+     4.5:1 text ratio on --bg and --panel, and the first cut landed
+     between 3.8 and 4.7 with seven of the nine under 4.5.  Amber, cyan
+     and blue moved first; the rest followed so the family stays one tier.  The amber keeps the brand's saturation at the
+     lower lightness but sits at hue 40 rather than 35 so it still reads
+     gold at that depth instead of brown.  Each hue carries its triplet
+     into its rgba glow sibling below. */
+  --accent: #745415;
+  --accent-dim: rgba(116, 84, 21, 0.1);
+  --accent-glow: rgba(116, 84, 21, 0.05);
+  --brand-mark-end: #9f731d;
+  --green: #065f46;
+  --red: #991b1b;
+  --yellow: #92400e;
+  --cyan: #155e75;
+  --magenta: #6d28d9;
+  --blue: #075985;
+  --discord: #4338ca; /* darker indigo on white surface — passes WCAG AA */
+  --slack: #9d174d; /* darker rose */
   --on-color: #ffffff;
-  --green-glow: rgba(4, 120, 87, 0.25);
-  --red-glow: rgba(220, 38, 38, 0.25);
-  --yellow-glow: rgba(180, 83, 9, 0.25);
-  --accent-glow-strong: rgba(140, 94, 27, 0.15);
-  --cyan-glow: rgba(14, 116, 144, 0.2);
-  --magenta-glow: rgba(124, 58, 237, 0.2);
-  --blue-glow: rgba(3, 105, 161, 0.2);
-  --discord-glow: rgba(79, 70, 229, 0.2);
-  --slack-glow: rgba(190, 24, 93, 0.2);
+  --green-glow: rgba(6, 95, 70, 0.25);
+  --red-glow: rgba(153, 27, 27, 0.25);
+  /* 0.2, not the 0.25 of its siblings: --yellow text sits on this glow
+     (.dash-persistence-badge, .policy-ask) and clears 4.5:1 only below
+     0.25. */
+  --yellow-glow: rgba(146, 64, 14, 0.2);
+  --accent-glow-strong: rgba(116, 84, 21, 0.15);
+  --cyan-glow: rgba(21, 94, 117, 0.2);
+  --magenta-glow: rgba(109, 40, 217, 0.2);
+  --blue-glow: rgba(7, 89, 133, 0.2);
+  --discord-glow: rgba(67, 56, 202, 0.2);
+  --slack-glow: rgba(157, 23, 77, 0.2);
   --border: rgba(0, 0, 0, 0.08);
   --border-strong: rgba(0, 0, 0, 0.12);
   --code-bg: #f0f1f5;
@@ -178,6 +200,7 @@
   --warn-soft: oklch(0.94 0.05 80);
   --warn-tint: oklch(0.92 0.1 80);
   --warn-tint-border: oklch(0.64 0.15 80);
+  --warn-text: oklch(0.44 0.13 80); /* dark amber on pale warn-tint: 6.0:1 */
   --err: oklch(0.5 0.17 25);
   --err-soft: oklch(0.94 0.05 25);
   --err-fill: oklch(0.45 0.17 25);

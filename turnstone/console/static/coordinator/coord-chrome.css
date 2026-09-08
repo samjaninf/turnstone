@@ -109,16 +109,6 @@
   flex-direction: column;
   min-height: 0;
 }
-/* Pane-hosted: the shell's per-pane ✕/− chip floats in the pane's top-right
-   corner (top 5px + 28px tall) — exactly where this sidebar's toggle row and
-   the Children refresh sit.  Drop the sidebar content below the chip's lane;
-   padding (not margin) keeps the column's left border running the full pane
-   height.  (In practice this is EVERY coordinator — the /coordinator/{ws_id}
-   standalone page is a chip-less direct-URL fallback no UI path navigates to;
-   the .pane-body scope just keeps that lane honest.) */
-.pane-body.coord-chrome-root #coord-sidebar.sidebar {
-  padding-top: 44px;
-}
 #coord-children-wrap {
   min-height: 40%;
   max-height: 60%;
@@ -138,14 +128,34 @@
   gap: 6px;
   margin: 8px 0 6px;
 }
+/* min-width: 0 + ellipsis so the heading is what yields under a narrow
+   sidebar — without it the head row's nowrap cells (count, pending chip,
+   refresh) raise the sidebar's min-content floor and the transcript
+   column narrows instead. */
 .coord-sidebar-head .side-label {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   padding: 0;
 }
 .coord-sidebar-head .side-count {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--ink-4);
+}
+/* Children-heading pending chip — the "x pending" half of the old
+   "(N · x pending)" count as a clickable warn chip, now reading
+   "x approvals".  The look is chat.css .warn-chip (shared with the status
+   bar's approval chip); only the geometry lives here.  Hidden at zero via
+   [hidden], so no display.  14px line box + 2px border + 2px padding =
+   18px, inside the head's 22px ghost-button row. */
+.coord-sidebar-head .side-count-pending {
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 14px;
 }
 .coord-sidebar-body {
   flex: 1;
